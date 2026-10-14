@@ -468,6 +468,7 @@ class RadarBot:
         self.store = Store(Path(os.getenv("DATA_DIR", "data")))
         self._logged_format: set[str] = set()
         self._short_assets: set[str] = set()
+        self._working_proxy: str | None = None
         self._candles: dict[str, dict[int, dict[str, Any]]] = {}
         self._empty_ticks = 0
         # ~2 min sem nenhum candle = conexão provavelmente morta.
@@ -703,7 +704,12 @@ class RadarBot:
         while True:
             via = ""
             if self.proxies:
-                proxy = fresh_session(self.proxies[attempt % len(self.proxies)])
+                # 1ª tentativa: o IP que já funcionou (reconexão) ou o proxy exatamente como configurado.
+                # Depois de falhar, sorteia sessão nova (IP novo) no proxy sticky.
+                if attempt == 0:
+                    proxy = self._working_proxy or self.proxies[0]
+                else:
+                    proxy = fresh_session(self.proxies[attempt % len(self.proxies)])
                 use_proxy(proxy)
                 via = f" via proxy {proxy_label(proxy)} (tentativa {attempt + 1})"
             attempt += 1
@@ -722,6 +728,8 @@ class RadarBot:
             except Exception as exc:
                 connected, message = False, f"{type(exc).__name__}: {exc}"
             if connected:
+                if self.proxies:
+                    self._working_proxy = proxy
                 return client
 
             try:
@@ -736,7 +744,7 @@ class RadarBot:
                 cycle = max(cycle, 5)
             if self.proxies and attempt % cycle:
                 LOGGER.error("Não foi possível conectar na Quotex: %s. Testando o próximo proxy.", message)
-                await asyncio.sleep(15)
+                await asyncio.sleep(30)
                 continue
             LOGGER.error("Não foi possível conectar na Quotex: %s. Nova tentativa em %s min.", message, delay // 60)
             await asyncio.sleep(delay)

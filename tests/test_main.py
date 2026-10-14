@@ -316,7 +316,7 @@ def test_connect_rotates_proxies(bot, monkeypatch):
 
     asyncio.run(bot.connect())
     assert used == ["http://u:p@1.1.1.1:1", "http://u:p@2.2.2.2:2"] * 2
-    assert sleeps == [15, 60, 15]  # próximo proxy rápido; espera longa só após a volta completa
+    assert sleeps == [30, 60, 30]  # próximo proxy rápido; espera longa só após a volta completa
     assert "api.telegram.org" in os.environ["NO_PROXY"]
 
 
@@ -383,8 +383,16 @@ def test_sticky_proxy_retries_quickly_with_new_ip(bot, monkeypatch):
     monkeypatch.setattr(main.asyncio, "sleep", fake_sleep)
 
     asyncio.run(bot.connect())
-    assert len(set(used)) == 6  # cada tentativa com sessão (IP) nova
-    assert sleeps == [15, 15, 15, 15, 60]
+    assert used[0] == bot.proxies[0]  # 1ª tentativa: proxy exatamente como configurado
+    assert len(set(used)) == 6  # depois, cada tentativa com sessão (IP) nova
+    assert sleeps == [30, 30, 30, 30, 60]
+    assert bot._working_proxy == used[-1]
+
+    # Reconexão: começa pelo IP que funcionou.
+    used.clear()
+    used.extend([None] * 5)  # o 6º connect() da fake retorna sucesso
+    asyncio.run(bot.connect())
+    assert used[-1] == bot._working_proxy
 
 
 def test_tick_keeps_history_on_empty_response_and_reconnects(bot):
