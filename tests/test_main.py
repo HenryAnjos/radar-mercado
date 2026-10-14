@@ -586,11 +586,11 @@ def test_backtest_outcome_and_one_entry_per_asset():
         return {"strategy": "auto", "asset": asset, "time": t, "direction": "CALL", "confidence": 3,
                 "outcomes": {1: "WIN", 2: "LOSS", 3: "WIN", 5: "WIN"}}
 
-    rows = [row(0), row(60), row(120), row(180), row(60, "GBPUSD_otc")]
+    rows = [row(0), row(60), row(120), row(300), row(60, "GBPUSD_otc")]
     rows.sort(key=lambda r: r["time"])
-    # Expiração 2 min: entrada em 120, resultado no candle 180 -> par livre de novo em 180.
+    # Aviso 3 min antes: sinal no candle 0 -> entrada em 240; expiração 2 min -> resultado no candle 300.
     taken = simulate(rows, "auto", 3, 2, PERIOD)
-    assert [(t, a) for t, a, _ in taken] == [(0, "EURUSD_otc"), (60, "GBPUSD_otc"), (180, "EURUSD_otc")]
+    assert [(t, a) for t, a, _ in taken] == [(0, "EURUSD_otc"), (60, "GBPUSD_otc"), (300, "EURUSD_otc")]
 
 
 def test_telegram_token_never_logged(caplog):
@@ -744,8 +744,7 @@ def test_gale_win_on_g1(bot):
     add_gale_pending(bot, "CALL")
     asyncio.run(bot.resolve_pending(gale_candles([-1])))  # entrada perdeu -> G1
     assert bot.store.pending[0]["gale"] == 1
-    gale_msg = bot.telegram.text.await_args.args[0]
-    assert "GALE 1" in gale_msg and "EUR/USD (OTC)" in gale_msg
+    bot.telegram.text.assert_not_awaited()  # nada no grupo no meio do ciclo
     assert bot.store.events("result") == []
 
     asyncio.run(bot.resolve_pending(gale_candles([-1, 1])))  # G1 ganhou
@@ -786,7 +785,7 @@ def test_signal_and_report_show_gale():
 
     signal = Signal("EURUSD_otc", "CALL", ENTRY - 2 * PERIOD, PERIOD, 2, 3, ("x",))
     text = format_signal(signal, ENTRY, "SINAL GRÁTIS", "", "", max_gale=2)
-    assert "Até 2 gales: G1 09:02 · G2 09:04" in text
+    assert "faça até 2 re-entradas (gale): G1 09:02 · G2 09:04" in text
     assert "7x a entrada" in text and "sem gale" not in text
     assert "sem gale" in format_signal(signal, ENTRY, "SINAL GRÁTIS", "", "", max_gale=0)
 
@@ -802,3 +801,17 @@ def test_signal_and_report_show_gale():
     assert "✅ Wins: 3 (direto 1 · G1 1 · G2 1)" in report
     assert "❌ Losses: 1" in report
     assert "COMPRA · ✅ G1" in report
+
+
+def test_signal_entry_is_3_minutes_ahead_with_5_min_expiry(bot, monkeypatch):
+    import time
+
+    import src.main as main
+    from src.strategy import Signal
+
+    assert bot.expiry_minutes == 5 and bot.lead_minutes == 3
+    candle = int(time.time()) // PERIOD * PERIOD - PERIOD  # candle que acabou de fechar
+    signal = Signal("EURUSD_otc", "CALL", candle, PERIOD, 5, 3, ("x",))
+    monkeypatch.setattr(main, "analyze", lambda *a, **k: signal)
+    _, entry = bot.evaluate([{"time": candle}], "EURUSD_otc")
+    assert entry == candle + PERIOD + 180  # entrada 3 min depois do fechamento

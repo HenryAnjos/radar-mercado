@@ -278,7 +278,7 @@ def format_signal(signal: Signal, entry_time: int, title: str, broker_link: str,
             f"G{n} {brt(entry_time + n * signal.expiry_minutes * 60):%H:%M}" for n in range(1, max_gale + 1)
         )
         lines += [
-            f"🔁 Até {max_gale} gale{'s' if max_gale > 1 else ''}: {gale_times}",
+            f"🔁 Se não bater, faça até {max_gale} re-entrada{'s' if max_gale > 1 else ''} (gale): {gale_times}",
             # Com gale o risco é do ciclo inteiro: entrada + gales somados podem chegar a 2^(n+1)-1 entradas.
             f"💼 Risco: o ciclo completo (entrada + gales = {2 ** (max_gale + 1) - 1}x a entrada) até 2% da banca",
         ]
@@ -549,7 +549,9 @@ class RadarBot:
         self.assets = [a.strip() for a in raw_assets.split(",") if a.strip()]
         self.period = int(os.getenv("PERIOD_SECONDS", "60"))
         self.offset = int(os.getenv("CANDLES_OFFSET_SECONDS", str(self.period * 120)))
-        self.expiry_minutes = int(os.getenv("EXPIRY_MINUTES", "2"))
+        self.expiry_minutes = int(os.getenv("EXPIRY_MINUTES", "5"))
+        # Antecedência do aviso: a entrada fica marcada para N minutos depois do fechamento do candle analisado.
+        self.lead_minutes = max(1, int(os.getenv("SIGNAL_LEAD_MINUTES", "3")))
         self.poll_seconds = max(3, int(os.getenv("POLL_SECONDS", "5")))
         self.min_confidence = int(os.getenv("MIN_CONFIDENCE", "3"))
         self.one_at_a_time = os.getenv("ONE_SIGNAL_AT_A_TIME", "true").lower() in ("1", "true", "sim", "yes")
@@ -666,10 +668,7 @@ class RadarBot:
                 item["gale"] = level + 1
                 self.store.save()
                 next_entry = entry + item["expiry_minutes"] * 60
-                await self.telegram.text(
-                    f"🔁 <b>GALE {level + 1}</b> · {asset_label(item['asset'])} · {brt(next_entry):%H:%M} · "
-                    f"{DIRECTION_LABEL[item['direction']]}"
-                )
+                # Sem mensagem no grupo: as re-entradas já foram informadas no sinal; o resultado sai no fim do ciclo.
                 LOGGER.info("Gale %s: %s %s entrada %s", level + 1, item["asset"], item["direction"], brt(next_entry))
                 continue
 
@@ -723,8 +722,8 @@ class RadarBot:
         LOGGER.info("%s: sinal %s (%s, confiança %s): %s", asset, signal.direction, signal.strategy,
                     signal.confidence, "; ".join(signal.reasons))
 
-        # Entrada na abertura do próximo candle cheio, para dar tempo de o membro abrir a corretora.
-        entry_time = signal.candle_time + 2 * self.period
+        # Entrada marcada N minutos depois do fechamento do candle, para dar tempo de o membro se preparar.
+        entry_time = signal.candle_time + self.period + self.lead_minutes * 60
         if time.time() > entry_time - 10:
             LOGGER.warning("Sinal descartado: chegou tarde demais para a entrada das %s.", brt(entry_time))
             return None

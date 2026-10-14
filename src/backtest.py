@@ -22,6 +22,7 @@ from .strategy import STRATEGIES, analyze
 EXPIRIES = (1, 2, 3, 5)
 CONFIDENCES = (3, 4)
 MIN_SIGNALS = 30
+LEAD = max(1, int(os.getenv("SIGNAL_LEAD_MINUTES", "3")))  # mesma antecedência do bot
 
 
 def load_candles(data_dir: Path) -> dict[str, list[dict[str, Any]]]:
@@ -64,7 +65,7 @@ def collect(candles: dict[str, list[dict[str, Any]]], window: int, period: int) 
                                  expiry_minutes=1, min_confidence=1)
                 if signal is None:
                     continue
-                entry = signal.candle_time + 2 * period
+                entry = signal.candle_time + period + LEAD * 60
                 rows.append({
                     "strategy": strategy,
                     "asset": asset,
@@ -90,7 +91,7 @@ def simulate(rows: list[dict[str, Any]], strategy: str, confidence: int, expiry:
         result = r["outcomes"][expiry]
         if result is None:
             continue
-        entry = r["time"] + 2 * period
+        entry = r["time"] + period + LEAD * 60
         busy_until[r["asset"]] = entry + expiry * 60 - period  # libera quando o resultado sai
         taken.append((r["time"], r["asset"], result))
     return taken
@@ -140,7 +141,7 @@ def main() -> None:
     current = (
         os.getenv("STRATEGY", "auto").strip().lower(),
         int(os.getenv("MIN_CONFIDENCE", "3")),
-        int(os.getenv("EXPIRY_MINUTES", "2")),
+        int(os.getenv("EXPIRY_MINUTES", "5")),
     )
 
     table = []
