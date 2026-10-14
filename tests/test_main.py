@@ -124,7 +124,7 @@ def bot(monkeypatch, tmp_path):
     monkeypatch.setenv("PERIOD_SECONDS", str(PERIOD))
     monkeypatch.setenv("DATA_DIR", str(tmp_path))
     for name in ("IMG_START", "IMG_WIN", "IMG_END"):
-        monkeypatch.setenv(name, "")
+        monkeypatch.setenv(name, "nenhuma")  # testes não usam as imagens reais de assets/
     radar = RadarBot()
     radar.telegram.text = AsyncMock()
     radar.telegram.photo = AsyncMock()
