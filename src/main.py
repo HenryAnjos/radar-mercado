@@ -528,8 +528,11 @@ class RadarBot:
                 host=self.host,
                 on_otp_callback=otp_unavailable,
             )
+            LOGGER.info("Conectando na Quotex (%s)...", self.host)
             try:
-                connected, message = await client.connect()
+                connected, message = await asyncio.wait_for(client.connect(), timeout=180)
+            except asyncio.TimeoutError:
+                connected, message = False, "sem resposta da Quotex em 3 min"
             except Exception as exc:
                 connected, message = False, f"{type(exc).__name__}: {exc}"
             if connected:
@@ -558,6 +561,7 @@ class RadarBot:
 
 
 if __name__ == "__main__":
+    LOGGER.info("Radar iniciando.")
     try:
         asyncio.run(RadarBot().run())
     except KeyboardInterrupt:
