@@ -681,3 +681,18 @@ def test_working_proxy_survives_restart(bot, monkeypatch):
     # Proxy trocado (outra senha/conta): ignora o IP salvo.
     monkeypatch.setenv("QUOTEX_PROXIES", configured.replace("u:p", "u:nova"))
     assert main.RadarBot()._working_proxy is None
+
+
+def test_status_log_every_15_minutes(bot, caplog):
+    import logging
+    import time
+
+    current = int(time.time()) // PERIOD * PERIOD
+    rows = [{"time": current - i * PERIOD, "open": 1.1, "close": 1.1 + (i % 3) * 1e-4, "high": 1.2, "low": 1.0}
+            for i in range(60, 0, -1)]
+    with caplog.at_level(logging.INFO, logger="radar-mercado"):
+        bot.log_status({"EURUSD_otc": rows}, "2026-10-14 00:00-23:59")
+        bot.log_status({"EURUSD_otc": rows}, "2026-10-14 00:00-23:59")  # antes de 15 min: não repete
+    lines = [r.getMessage() for r in caplog.records if "Radar ativo" in r.getMessage()]
+    assert len(lines) == 1
+    assert "EURUSD_otc ADX" in lines[0] and "sinais hoje 0" in lines[0]

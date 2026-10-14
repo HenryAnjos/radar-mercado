@@ -29,7 +29,7 @@ if not hasattr(CurlResponse, "reason_phrase"):
         lambda self: f"HTTP {self.status_code} {getattr(self, 'reason', '') or ''}".strip()
     )
 
-from .strategy import STRATEGIES, Signal, analyze
+from .strategy import ADX_RANGE, ADX_TREND, STRATEGIES, Signal, adx, analyze
 
 load_dotenv()
 
@@ -541,6 +541,7 @@ class RadarBot:
         qx_config.base_dir = data_dir.resolve()
         self._logged_format: set[str] = set()
         self._short_assets: set[str] = set()
+        self._last_status = 0.0
         # IP do proxy que conectou da última vez (sobrevive a reinícios, se ainda for o mesmo proxy configurado).
         saved = self.store.state.get("working_proxy")
         self._working_proxy: str | None = (
@@ -787,6 +788,8 @@ class RadarBot:
             await self.open_session(key)
             open_key = key
 
+        self.log_status(closed_by_asset, key)
+
         if key and open_key == key and closed_by_asset:
             processed = self.store.state.get("last_processed")
             if not isinstance(processed, dict):
@@ -805,6 +808,32 @@ class RadarBot:
                 best = max(candidates, key=lambda c: (c[0].confidence, -order.get(c[0].asset, 0)))
                 await self.send_signal(*best, key)
             self.store.save()
+
+    def log_status(self, closed_by_asset: dict[str, list[dict[str, Any]]], key: str | None) -> None:
+        """A cada 15 min, um resumo no log: prova que o radar está analisando mesmo sem sinal."""
+        now = time.time()
+        if now - self._last_status < 15 * 60:
+            return
+        self._last_status = now
+        parts = []
+        for asset in self.assets:
+            closed = closed_by_asset.get(asset)
+            if not closed:
+                parts.append(f"{asset} sem dados")
+                continue
+            reading = adx(closed[:-3])
+            if reading is None:
+                parts.append(f"{asset} ?")
+                continue
+            regime = "tendência" if reading[0] >= ADX_TREND else "lateral" if reading[0] < ADX_RANGE else "indefinido"
+            parts.append(f"{asset} ADX {reading[0]:.0f} ({regime})")
+        sent_today = sum(
+            1 for s in self.store.events("signal") if s.get("sent_at", "").startswith(datetime.now(BRT).date().isoformat())
+        )
+        LOGGER.info(
+            "Radar ativo · %s · sessão %s · entradas abertas %s · sinais hoje %s · %s",
+            self.strategy, key or "fora da janela", len(self.store.pending), sent_today, "; ".join(parts),
+        )
 
     async def connect(self) -> Quotex:
         """Tenta logar com espera crescente, para não martelar a Quotex (e piorar um bloqueio) em loop."""
