@@ -599,7 +599,7 @@ class RadarBot:
         self.cooldown_seconds = max(0, int(os.getenv("SIGNAL_COOLDOWN_MINUTES", "0"))) * 60
         self.windows = parse_windows(os.getenv("ALLOWED_WINDOWS", "09:00-11:00"))
 
-        self.title = os.getenv("SIGNAL_TITLE", "SINAL GRÁTIS")
+        self.title = os.getenv("SIGNAL_TITLE", "PADRÃO IDENTIFICADO!")
         self.broker_link = os.getenv("BROKER_LINK", "").strip()
         self.tutorial_link = os.getenv("TUTORIAL_LINK", "").strip()
         self.img_start = optional_path("IMG_START", "operacoes-iniciando")
