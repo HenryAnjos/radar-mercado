@@ -45,6 +45,10 @@ class ConfigError(RuntimeError):
     pass
 
 
+class ReconnectNeeded(RuntimeError):
+    pass
+
+
 def required_env(name: str) -> str:
     value = os.getenv(name, "").strip()
     if not value or value.startswith("cole-") or value.startswith("seu-") or value.startswith("sua-"):
@@ -429,6 +433,10 @@ class RadarBot:
 
         self.store = Store(Path(os.getenv("DATA_DIR", "data")))
         self._logged_format = False
+        self._candles: dict[int, dict[str, Any]] = {}
+        self._empty_ticks = 0
+        # ~2 min sem nenhum candle = conexão provavelmente morta.
+        self.max_empty_ticks = max(3, 120 // self.poll_seconds)
 
     # ---- sessões
 
@@ -578,15 +586,28 @@ class RadarBot:
                         sorted(raw.keys()), len(raw.get("candles") or []), sample)
             self._logged_format = True
         candles = merge_history(candles or [], raw)
+        now_ts = time.time()
+
+        # Guarda os candles entre ciclos: uma resposta vazia ou parcial da Quotex não apaga o histórico.
+        if candles:
+            self._empty_ticks = 0
+        else:
+            self._empty_ticks += 1
+            if self._empty_ticks >= self.max_empty_ticks:
+                raise ReconnectNeeded(f"{self._empty_ticks} ciclos seguidos sem candles da Quotex")
+        for candle in candles:
+            self._candles[candle["time"]] = candle
+        oldest = now_ts - self.offset - 10 * self.period
+        self._candles = {t: c for t, c in self._candles.items() if t >= oldest}
+
         # A pyquotex às vezes já descarta o candle em formação, às vezes não; por isso o filtro é
         # pelo horário: só entra candle cujo período já terminou. Nunca use candle aberto.
-        now_ts = time.time()
         closed = sorted(
-            (c for c in candles or [] if int(c["time"]) + self.period <= now_ts),
+            (c for c in self._candles.values() if int(c["time"]) + self.period <= now_ts),
             key=lambda c: int(c["time"]),
         )
         if len(closed) < 30:
-            LOGGER.warning("Candles fechados insuficientes recebidos: %s", len(closed))
+            LOGGER.warning("Candles fechados insuficientes: %s", len(closed))
             return
         last_closed = int(closed[-1]["time"])
 
@@ -664,6 +685,15 @@ class RadarBot:
             while True:
                 try:
                     await self.tick(client)
+                except ReconnectNeeded as exc:
+                    LOGGER.warning("Reconectando na Quotex: %s.", exc)
+                    try:
+                        await client.close()
+                    except Exception:
+                        pass
+                    self._empty_ticks = 0
+                    client = await self.connect()
+                    LOGGER.info("Reconectado. Lendo somente candles de %s em %ss.", self.asset, self.period)
                 except Exception:
                     LOGGER.exception("Falha no ciclo; tentando novamente.")
                 await asyncio.sleep(self.poll_seconds)

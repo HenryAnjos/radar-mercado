@@ -385,3 +385,31 @@ def test_sticky_proxy_retries_quickly_with_new_ip(bot, monkeypatch):
     asyncio.run(bot.connect())
     assert len(set(used)) == 6  # cada tentativa com sessão (IP) nova
     assert sleeps == [15, 15, 15, 15, 60]
+
+
+def test_tick_keeps_history_on_empty_response_and_reconnects(bot):
+    import time
+
+    from src.main import ReconnectNeeded
+
+    current = int(time.time()) // PERIOD * PERIOD
+    rows = [
+        {"time": current - i * PERIOD, "open": 1.1, "close": 1.1, "high": 1.2, "low": 1.0}
+        for i in range(40, 0, -1)
+    ]
+    client = AsyncMock()
+    client.api.candle_v2_data = {}
+    client.get_candles.return_value = rows
+    bot.resolve_pending = AsyncMock()
+    asyncio.run(bot.tick(client))
+
+    # Resposta vazia: continua usando o histórico guardado.
+    client.get_candles.return_value = []
+    bot.resolve_pending.reset_mock()
+    asyncio.run(bot.tick(client))
+    assert len(bot.resolve_pending.await_args.args[0]) == 40
+
+    # Muitos ciclos seguidos vazios: pede reconexão.
+    with pytest.raises(ReconnectNeeded):
+        for _ in range(bot.max_empty_ticks):
+            asyncio.run(bot.tick(client))
