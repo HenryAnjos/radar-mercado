@@ -3,7 +3,7 @@
 Uso (no Console do Railway ou no PC):  python -m src.backtest
 Opções: --data /data  --window 120  --period 60
 
-Compara variações (confirmações, expiração, filtro de tendência, filtro de mercado parado) e mostra a
+Compara as estratégias (auto, tendencia, reversao, classica, classica_filtros), confirmações e expiração e mostra a
 taxa de acerto em duas partes dos dados: os primeiros 70% e os últimos 30%. Uma variação só merece
 confiança se for boa nas DUAS partes; se só brilha na primeira, provavelmente foi sorte.
 """
@@ -17,12 +17,10 @@ from collections import defaultdict
 from pathlib import Path
 from typing import Any
 
-from .strategy import analyze_closed_candles
+from .strategy import STRATEGIES, analyze
 
 EXPIRIES = (1, 2, 3, 5)
 CONFIDENCES = (3, 4)
-TREND = (False, True)
-VOLATILITY = (0.0, 0.8)
 MIN_SIGNALS = 30
 
 
@@ -61,35 +59,31 @@ def collect(candles: dict[str, list[dict[str, Any]]], window: int, period: int) 
             # Janela com buracos (bot desligado) distorce as médias: pula.
             if int(closed[-1]["time"]) - int(closed[0]["time"]) != (window - 1) * period:
                 continue
-            signal = analyze_closed_candles(closed, asset=asset, period_seconds=period, expiry_minutes=1,
-                                            min_confidence=1)
-            if signal is None:
-                continue
-            entry = signal.candle_time + 2 * period
-            rows.append({
-                "asset": asset,
-                "time": signal.candle_time,
-                "direction": signal.direction,
-                "confidence": signal.confidence,
-                "trend_ok": signal.trend_ok,
-                "volatility": signal.volatility,
-                "outcomes": {e: outcome(by_time, signal.direction, entry, e, period) for e in EXPIRIES},
-            })
+            for strategy in STRATEGIES:
+                signal = analyze(closed, strategy=strategy, asset=asset, period_seconds=period,
+                                 expiry_minutes=1, min_confidence=1)
+                if signal is None:
+                    continue
+                entry = signal.candle_time + 2 * period
+                rows.append({
+                    "strategy": strategy,
+                    "asset": asset,
+                    "time": signal.candle_time,
+                    "direction": signal.direction,
+                    "confidence": signal.confidence,
+                    "outcomes": {e: outcome(by_time, signal.direction, entry, e, period) for e in EXPIRIES},
+                })
     rows.sort(key=lambda r: r["time"])
     return rows
 
 
-def simulate(rows: list[dict[str, Any]], confidence: int, expiry: int, trend: bool, volatility: float,
+def simulate(rows: list[dict[str, Any]], strategy: str, confidence: int, expiry: int,
              period: int) -> list[tuple[int, str, str]]:
     """Aplica a variação respeitando 'uma entrada aberta por par' como no bot. Devolve (time, asset, resultado)."""
     busy_until: dict[str, int] = defaultdict(int)
     taken = []
     for r in rows:
-        if r["confidence"] < confidence:
-            continue
-        if trend and not r["trend_ok"]:
-            continue
-        if volatility and (r["volatility"] is None or r["volatility"] < volatility):
+        if r["strategy"] != strategy or r["confidence"] < confidence:
             continue
         if r["time"] < busy_until[r["asset"]]:
             continue
@@ -106,6 +100,15 @@ def rate(results: list[str]) -> tuple[int, int, float | None]:
     wins = results.count("WIN")
     losses = results.count("LOSS")
     return wins, losses, (wins / (wins + losses) * 100 if wins + losses else None)
+
+
+def margin(wins: int, losses: int) -> float | None:
+    """Margem de erro (95%) da taxa, em pontos percentuais. Com poucas entradas ela é enorme."""
+    n = wins + losses
+    if not n:
+        return None
+    p = wins / n
+    return 1.96 * (p * (1 - p) / n) ** 0.5 * 100
 
 
 def fmt(value: float | None) -> str:
@@ -135,31 +138,33 @@ def main() -> None:
 
     rows = collect(candles, window, period)
     current = (
+        os.getenv("STRATEGY", "auto").strip().lower(),
         int(os.getenv("MIN_CONFIDENCE", "3")),
         int(os.getenv("EXPIRY_MINUTES", "2")),
-        os.getenv("TREND_FILTER", "false").lower() in ("1", "true", "sim", "yes"),
-        float(os.getenv("MIN_VOLATILITY", "0")),
     )
 
     table = []
-    for conf, exp, trend, vol in itertools.product(CONFIDENCES, EXPIRIES, TREND, VOLATILITY):
-        taken = simulate(rows, conf, exp, trend, vol, period)
+    for strat, conf, exp in itertools.product(STRATEGIES, CONFIDENCES, EXPIRIES):
+        taken = simulate(rows, strat, conf, exp, period)
         _, _, all_rate = rate([t[2] for t in taken])
         _, _, first = rate([t[2] for t in taken if t[0] < split])
         _, _, last = rate([t[2] for t in taken if t[0] >= split])
         wins, losses, _ = rate([t[2] for t in taken])
-        table.append(((conf, exp, trend, vol), len(taken), wins, losses, all_rate, first, last))
+        table.append(((strat, conf, exp), len(taken), wins, losses, all_rate, first, last))
 
     print()
     print("Para não perder dinheiro com payout de 80–90%, a taxa precisa ficar acima de ~53–56%.")
     print(f"Variações com menos de {MIN_SIGNALS} entradas aparecem no fim: amostra pequena demais.")
     print()
-    print("conf exp tendência parado | entradas  /hora   W    L  | taxa    70%    30%")
+    print("Só confie numa taxa se ela continuar acima de ~55% mesmo descontando a margem (±).")
+    print()
+    print("estratégia        conf exp | entradas  /hora   W    L  | taxa   ±margem   70%    30%")
     table.sort(key=lambda r: (r[1] >= MIN_SIGNALS, min(r[5] or 0, r[6] or 0)), reverse=True)
-    for (conf, exp, trend, vol), n, wins, losses, all_rate, first, last in table:
-        mark = "  ← atual" if (conf, exp, trend, vol) == current else ""
-        print(f" {conf}    {exp}m  {'sim' if trend else 'não':^9} {vol or '-':^6} | {n:6d}  {n / hours:5.1f}"
-              f"  {wins:4d} {losses:4d} | {fmt(all_rate)} {fmt(first)} {fmt(last)}{mark}")
+    for (strat, conf, exp), n, wins, losses, all_rate, first, last in table:
+        mark = "  ← atual" if (strat, conf, exp) == current else ""
+        print(f" {strat:16}  {conf}   {exp}m | {n:6d}  {n / hours:5.1f}"
+              f"  {wins:4d} {losses:4d} | {fmt(all_rate)} ±{(margin(wins, losses) or 0):4.1f}  "
+              f"{fmt(first)} {fmt(last)}{mark}")
 
     print()
     print("Por par (configuração atual):")

@@ -27,7 +27,7 @@ if not hasattr(CurlResponse, "reason_phrase"):
         lambda self: f"HTTP {self.status_code} {getattr(self, 'reason', '') or ''}".strip()
     )
 
-from .strategy import Signal, analyze_closed_candles
+from .strategy import STRATEGIES, Signal, analyze
 
 load_dotenv()
 
@@ -490,6 +490,10 @@ class RadarBot:
         self.one_at_a_time = os.getenv("ONE_SIGNAL_AT_A_TIME", "true").lower() in ("1", "true", "sim", "yes")
         # Total de entradas abertas ao mesmo tempo (somando todos os pares) e intervalo mínimo entre sinais.
         self.max_open_entries = max(1, int(os.getenv("MAX_OPEN_ENTRIES", "1")))
+        # auto = escolhe pelo tipo de mercado (ADX): tendência → pullback; lateral → reversão à média.
+        self.strategy = os.getenv("STRATEGY", "auto").strip().lower()
+        if self.strategy not in STRATEGIES:
+            raise ConfigError(f"STRATEGY inválida: {self.strategy}. Use uma de: {', '.join(STRATEGIES)}")
         # Filtros opcionais da estratégia (ligue só depois de o backtest mostrar que ajudam).
         self.trend_filter = os.getenv("TREND_FILTER", "false").lower() in ("1", "true", "sim", "yes")
         self.min_volatility = float(os.getenv("MIN_VOLATILITY", "0"))
@@ -609,8 +613,9 @@ class RadarBot:
         if self.one_at_a_time and any(p["asset"] == asset for p in self.store.pending):
             return None
 
-        signal = analyze_closed_candles(
+        signal = analyze(
             closed,
+            strategy=self.strategy,
             asset=asset,
             period_seconds=self.period,
             expiry_minutes=self.expiry_minutes,
@@ -621,6 +626,8 @@ class RadarBot:
         if signal is None:
             LOGGER.debug("%s: candle %s sem confluência mínima.", asset, int(closed[-1]["time"]))
             return None
+        LOGGER.info("%s: sinal %s (%s, confiança %s): %s", asset, signal.direction, signal.strategy,
+                    signal.confidence, "; ".join(signal.reasons))
 
         # Entrada na abertura do próximo candle cheio, para dar tempo de o membro abrir a corretora.
         entry_time = signal.candle_time + 2 * self.period
@@ -655,6 +662,7 @@ class RadarBot:
             "entry_time": entry_time,
             "expiry_minutes": signal.expiry_minutes,
             "confidence": signal.confidence,
+            "strategy": signal.strategy,
             "reasons": list(signal.reasons),
             "sent_at": datetime.now(BRT).isoformat(),
         }

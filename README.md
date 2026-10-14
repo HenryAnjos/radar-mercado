@@ -76,7 +76,7 @@ dos dados. Só vale trocar a configuração se a variação for melhor nas duas 
 
 ## Avisos
 
-- A estratégia em `src/strategy.py` (EMA 9/21 + RSI + candle) é demonstrativa e não foi validada. Faça backtest antes do grupo oficial.
+- As estratégias em `src/strategy.py` (auto, tendencia, reversao, classica) não foram validadas com dados reais. Rode o backtest antes do grupo oficial.
 - Não use martingale nem a função `buy()` da PyQuotex.
 - Se a Quotex pedir código PIN/2FA no login, o bot para com erro claro (não há terminal no servidor). Use uma conta demo sem 2FA.
 - A PyQuotex está fixada num commit revisado em `requirements.txt`. Antes de trocar o hash, revise o diff da biblioteca.

@@ -583,13 +583,13 @@ def test_backtest_outcome_and_one_entry_per_asset():
     assert outcome(by_time, "CALL", ENTRY, 10, PERIOD) is None
 
     def row(t, asset="EURUSD_otc"):
-        return {"asset": asset, "time": t, "direction": "CALL", "confidence": 3, "trend_ok": True,
-                "volatility": 1.0, "outcomes": {1: "WIN", 2: "LOSS", 3: "WIN", 5: "WIN"}}
+        return {"strategy": "auto", "asset": asset, "time": t, "direction": "CALL", "confidence": 3,
+                "outcomes": {1: "WIN", 2: "LOSS", 3: "WIN", 5: "WIN"}}
 
     rows = [row(0), row(60), row(120), row(180), row(60, "GBPUSD_otc")]
     rows.sort(key=lambda r: r["time"])
     # Expiração 2 min: entrada em 120, resultado no candle 180 -> par livre de novo em 180.
-    taken = simulate(rows, 3, 2, False, 0.0, PERIOD)
+    taken = simulate(rows, "auto", 3, 2, PERIOD)
     assert [(t, a) for t, a, _ in taken] == [(0, "EURUSD_otc"), (60, "GBPUSD_otc"), (180, "EURUSD_otc")]
 
 
