@@ -719,7 +719,8 @@ class RadarBot:
             session_results = [r for r in self.store.events("result") if r["session"] == item["session"]]
             text = format_result(result, session_results + [result])
             if outcome == "WIN" and self.img_win:
-                await self.telegram.photo(self.img_win, text)
+                # WIN com imagem: só a imagem, sem texto. O nível (direto/G1/G2) fica no relatório da sessão.
+                await self.telegram.photo(self.img_win)
             else:
                 await self.telegram.text(text)
 

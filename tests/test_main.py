@@ -209,8 +209,15 @@ def test_win_uses_image_when_configured(bot, tmp_path):
     add_pending(bot, "CALL")
     asyncio.run(bot.resolve_pending(candles(1.1, 1.2)))
     bot.telegram.photo.assert_awaited_once()
-    assert bot.telegram.photo.await_args.args[0] == image
+    assert bot.telegram.photo.await_args.args == (image,)  # só a imagem, sem legenda
     bot.telegram.text.assert_not_awaited()
+
+    # LOSS continua indo em texto, mesmo com imagem de win configurada.
+    bot.telegram.photo.reset_mock()
+    add_pending(bot, "CALL")
+    asyncio.run(bot.resolve_pending(candles(1.1, 1.0)))
+    bot.telegram.photo.assert_not_awaited()
+    assert "LOSS" in bot.telegram.text.await_args.args[0]
 
 
 def test_tick_ignores_open_candle(bot):
