@@ -496,7 +496,10 @@ def otp_unavailable(message: str) -> str:
     )
 
 
-DEFAULT_ASSETS = "EURUSD_otc,GBPUSD_otc,USDJPY_otc,AUDCAD_otc,EURJPY_otc"
+DEFAULT_ASSETS = (
+    "EURUSD_otc,GBPUSD_otc,USDJPY_otc,AUDCAD_otc,EURJPY_otc,AUDUSD_otc,"
+    "USDCAD_otc,USDCHF_otc,EURGBP_otc,GBPJPY_otc,AUDJPY_otc,NZDUSD_otc"
+)
 
 
 class RadarBot:
@@ -542,6 +545,8 @@ class RadarBot:
         self._logged_format: set[str] = set()
         self._short_assets: set[str] = set()
         self._last_status = 0.0
+        self._failures: dict[str, int] = {}
+        self._paused_until: dict[str, float] = {}
         # IP do proxy que conectou da última vez (sobrevive a reinícios, se ainda for o mesmo proxy configurado).
         saved = self.store.state.get("working_proxy")
         self._working_proxy: str | None = (
@@ -751,6 +756,9 @@ class RadarBot:
         closed_by_asset: dict[str, list[dict[str, Any]]] = {}
         received_any = False
         for asset in self.assets:
+            # Par que não responde (nome inexistente, mercado fechado) custa até 15 s por ciclo: pausa um tempo.
+            if self._paused_until.get(asset, 0) > now_ts:
+                continue
             received, closed = await self.fetch_closed(client, asset, now_ts)
             received_any = received_any or received
             if len(closed) < 30:
@@ -758,7 +766,14 @@ class RadarBot:
                     LOGGER.warning("%s: candles fechados insuficientes (%s). Par ignorado por enquanto.",
                                    asset, len(closed))
                     self._short_assets.add(asset)
+                if not received:
+                    self._failures[asset] = self._failures.get(asset, 0) + 1
+                    if self._failures[asset] >= 3:
+                        self._paused_until[asset] = now_ts + 10 * 60
+                        self._failures[asset] = 0
+                        LOGGER.warning("%s: sem resposta da Quotex; par pausado por 10 min.", asset)
                 continue
+            self._failures[asset] = 0
             if asset in self._short_assets:
                 LOGGER.info("%s: candles recebidos, par ativo.", asset)
                 self._short_assets.discard(asset)

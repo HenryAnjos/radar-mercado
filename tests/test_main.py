@@ -696,3 +696,26 @@ def test_status_log_every_15_minutes(bot, caplog):
     lines = [r.getMessage() for r in caplog.records if "Radar ativo" in r.getMessage()]
     assert len(lines) == 1
     assert "EURUSD_otc ADX" in lines[0] and "sinais hoje 0" in lines[0]
+
+
+def test_unresponsive_asset_is_paused(bot):
+    import time
+
+    current = int(time.time()) // PERIOD * PERIOD
+    rows = [{"time": current - i * PERIOD, "open": 1.1, "close": 1.1, "high": 1.2, "low": 1.0}
+            for i in range(40, 0, -1)]
+    bot.assets = ["EURUSD_otc", "XXXYYY_otc"]
+    calls = []
+
+    async def get_candles(asset, **kwargs):
+        calls.append(asset)
+        return [] if asset == "XXXYYY_otc" else rows
+
+    client = AsyncMock()
+    client.api.candle_v2_data = {}
+    client.get_candles.side_effect = get_candles
+    bot.resolve_pending = AsyncMock()
+    for _ in range(5):
+        asyncio.run(bot.tick(client))
+    assert calls.count("XXXYYY_otc") == 3  # depois de 3 falhas seguidas fica pausado
+    assert calls.count("EURUSD_otc") == 5
