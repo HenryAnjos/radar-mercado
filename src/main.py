@@ -17,6 +17,8 @@ from zoneinfo import ZoneInfo
 import httpx
 from curl_cffi.requests import Response as CurlResponse
 from dotenv import load_dotenv
+import pyquotex.config as qx_config
+import pyquotex.network.navigator as qx_navigator
 from pyquotex.stable_api import Quotex
 
 # A pyquotex migrou de httpx para curl_cffi mas ainda lê `reason_phrase` (só existe no httpx)
@@ -36,6 +38,26 @@ logging.basicConfig(
     format="%(asctime)s %(levelname)s %(message)s",
 )
 LOGGER = logging.getLogger("radar-mercado")
+
+# A pyquotex se apresenta como Chrome 120 (2023) com cabeçalho de Linux e impressão TLS de macOS, e o
+# websocket como "Quotex/1.0": sinais clássicos de robô para a Cloudflare. Aqui tudo vira um Chrome
+# atual e coerente (mesma versão e sistema na conexão TLS, nos cabeçalhos e no websocket).
+IMPERSONATE = os.getenv("QUOTEX_IMPERSONATE", "chrome150").strip()
+_chrome_version = "".join(ch for ch in IMPERSONATE if ch.isdigit()) or "150"
+BROWSER_UA = (
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) "
+    f"Chrome/{_chrome_version}.0.0.0 Safari/537.36"
+)
+qx_navigator.USER_AGENT_DEFAULT = BROWSER_UA
+_CurlAsyncSession = qx_navigator.AsyncSession
+
+
+def _impersonating_session(*args: Any, **kwargs: Any) -> Any:
+    kwargs["impersonate"] = IMPERSONATE
+    return _CurlAsyncSession(*args, **kwargs)
+
+
+qx_navigator.AsyncSession = _impersonating_session
 # O httpx loga cada URL em INFO, e a URL do Telegram contém o token do bot. Nunca deixe isso ir para o log.
 logging.getLogger("httpx").setLevel(logging.WARNING)
 logging.getLogger("httpcore").setLevel(logging.WARNING)
@@ -101,6 +123,11 @@ def fresh_session(proxy: str) -> str:
     Um id novo a cada tentativa troca o IP, para um IP marcado pela Cloudflare não travar o bot."""
     session_id = "".join(random.choices(string.ascii_letters + string.digits, k=8))
     return re.sub(r"([_-]session-)[A-Za-z0-9]+", rf"\g<1>{session_id}", proxy, count=1)
+
+
+def proxy_base(proxy: str) -> str:
+    """Proxy sem o id de sessão: identifica a mesma conta/configuração de proxy."""
+    return re.sub(r"([_-]session-)[A-Za-z0-9]+", r"\1", proxy)
 
 
 def use_proxy(proxy: str) -> None:
@@ -507,10 +534,18 @@ class RadarBot:
         self.img_win = optional_path("IMG_WIN")
         self.img_end = optional_path("IMG_END")
 
-        self.store = Store(Path(os.getenv("DATA_DIR", "data")))
+        data_dir = Path(os.getenv("DATA_DIR", "data"))
+        self.store = Store(data_dir)
+        # A pyquotex grava o login (cookies + token de sessão) em session.json na pasta atual, que some a
+        # cada deploy. No Volume, o bot reaproveita o login e não passa pela página que a Cloudflare bloqueia.
+        qx_config.base_dir = data_dir.resolve()
         self._logged_format: set[str] = set()
         self._short_assets: set[str] = set()
-        self._working_proxy: str | None = None
+        # IP do proxy que conectou da última vez (sobrevive a reinícios, se ainda for o mesmo proxy configurado).
+        saved = self.store.state.get("working_proxy")
+        self._working_proxy: str | None = (
+            saved if saved and any(proxy_base(saved) == proxy_base(p) for p in self.proxies) else None
+        )
         self._candles: dict[str, dict[int, dict[str, Any]]] = {}
         self._empty_ticks = 0
         # ~2 min sem nenhum candle = conexão provavelmente morta.
@@ -792,8 +827,12 @@ class RadarBot:
                 password=self.password,
                 lang="pt",
                 host=self.host,
+                user_agent=BROWSER_UA,
                 on_otp_callback=otp_unavailable,
             )
+            had_saved_login = bool((getattr(client, "session_data", None) or {}).get("token"))
+            if had_saved_login:
+                via += " reaproveitando o login salvo"
             LOGGER.info("Conectando na Quotex (%s)%s...", self.host, via)
             try:
                 connected, message = await asyncio.wait_for(client.connect(), timeout=180)
@@ -804,8 +843,14 @@ class RadarBot:
             if connected:
                 if self.proxies:
                     self._working_proxy = proxy
+                    self.store.state["working_proxy"] = proxy
+                    self.store.save()
                 return client
 
+            if had_saved_login:
+                # Login salvo expirou ou foi recusado: apaga para a próxima tentativa fazer login completo.
+                qx_config.update_session(self.email, {"cookies": None, "token": None, "user_agent": BROWSER_UA})
+                LOGGER.info("Login salvo não foi aceito; a próxima tentativa faz login completo.")
             try:
                 await client.close()
             except Exception:

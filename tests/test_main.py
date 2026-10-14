@@ -620,3 +620,64 @@ def test_telegram_token_never_logged(caplog):
     finally:
         main.httpx.AsyncClient = original
     assert "SEGREDO" not in caplog.text
+
+
+def test_browser_identity_is_modern_and_consistent():
+    from pyquotex.network.navigator import Browser
+
+    import src.main as main
+
+    browser = Browser()
+    assert "Chrome/150" in browser.headers["User-Agent"] and "Macintosh" in browser.headers["User-Agent"]
+    asyncio.run(browser.ensure_client())
+    try:
+        assert browser._client.impersonate == "chrome150"
+    finally:
+        asyncio.run(browser.close())
+    assert main.BROWSER_UA == browser.headers["User-Agent"]
+
+
+def test_saved_login_lives_in_data_dir_and_is_cleared_on_failure(bot, monkeypatch, tmp_path):
+    import pyquotex.config as qx_config
+
+    import src.main as main
+
+    assert qx_config.resource_path("session.json") == tmp_path.resolve() / "session.json"
+    qx_config.update_session(bot.email, {"cookies": "a=b", "token": "TOKEN-VELHO", "user_agent": main.BROWSER_UA})
+
+    seen_tokens = []
+
+    class FakeQuotex:
+        def __init__(self, **kwargs):
+            assert kwargs["user_agent"] == main.BROWSER_UA
+            self.session_data = qx_config.load_session(kwargs["email"], kwargs["user_agent"])
+
+        async def connect(self):
+            seen_tokens.append(self.session_data.get("token"))
+            return len(seen_tokens) == 2, "Websocket connection rejected."
+
+        async def close(self):
+            return True
+
+    async def fake_sleep(seconds):
+        pass
+
+    monkeypatch.setattr(main, "Quotex", FakeQuotex)
+    monkeypatch.setattr(main.asyncio, "sleep", fake_sleep)
+    asyncio.run(bot.connect())
+    # 1ª tentativa reaproveita o login salvo; recusado, ele é apagado e a 2ª faz login completo.
+    assert seen_tokens == ["TOKEN-VELHO", None]
+
+
+def test_working_proxy_survives_restart(bot, monkeypatch):
+    import src.main as main
+
+    configured = "http://u:p_country-br_session-aaaa_lifetime-24h@geo.iproyal.com:12321"
+    worked = "http://u:p_country-br_session-bbbb_lifetime-24h@geo.iproyal.com:12321"
+    bot.store.state["working_proxy"] = worked
+    bot.store.save()
+    monkeypatch.setenv("QUOTEX_PROXIES", configured)
+    assert main.RadarBot()._working_proxy == worked
+    # Proxy trocado (outra senha/conta): ignora o IP salvo.
+    monkeypatch.setenv("QUOTEX_PROXIES", configured.replace("u:p", "u:nova"))
+    assert main.RadarBot()._working_proxy is None
