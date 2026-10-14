@@ -36,6 +36,9 @@ logging.basicConfig(
     format="%(asctime)s %(levelname)s %(message)s",
 )
 LOGGER = logging.getLogger("radar-mercado")
+# O httpx loga cada URL em INFO, e a URL do Telegram contém o token do bot. Nunca deixe isso ir para o log.
+logging.getLogger("httpx").setLevel(logging.WARNING)
+logging.getLogger("httpcore").setLevel(logging.WARNING)
 BRT = ZoneInfo("America/Sao_Paulo")
 
 Window = tuple[clock_time, clock_time]

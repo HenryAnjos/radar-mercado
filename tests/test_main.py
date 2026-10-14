@@ -591,3 +591,32 @@ def test_backtest_outcome_and_one_entry_per_asset():
     # Expiração 2 min: entrada em 120, resultado no candle 180 -> par livre de novo em 180.
     taken = simulate(rows, 3, 2, False, 0.0, PERIOD)
     assert [(t, a) for t, a, _ in taken] == [(0, "EURUSD_otc"), (60, "GBPUSD_otc"), (180, "EURUSD_otc")]
+
+
+def test_telegram_token_never_logged(caplog):
+    import logging
+
+    import httpx
+
+    from src.main import Telegram
+
+    def handler(request):
+        return httpx.Response(200, json={"ok": True})
+
+    real_client = httpx.AsyncClient
+    transport = httpx.MockTransport(handler)
+
+    class Client(real_client):
+        def __init__(self, **kwargs):
+            super().__init__(transport=transport, **kwargs)
+
+    import src.main as main
+    original = main.httpx.AsyncClient
+    main.httpx.AsyncClient = Client
+    try:
+        with caplog.at_level(logging.DEBUG):
+            logging.getLogger().setLevel(logging.INFO)
+            asyncio.run(Telegram("123:SEGREDO", "-100").text("oi"))
+    finally:
+        main.httpx.AsyncClient = original
+    assert "SEGREDO" not in caplog.text
