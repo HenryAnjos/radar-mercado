@@ -249,18 +249,48 @@ def format_signal(signal: Signal, entry_time: int, title: str, broker_link: str,
     return "\n".join(lines)
 
 
+# Frases sorteadas a cada resultado, para o grupo não ver sempre o mesmo texto.
+# Sem promessa de resultado: o LOSS é registrado com a mesma clareza que o WIN.
+RESULT_PHRASES = {
+    "WIN": (
+        "Leitura confirmada. Seguimos com gestão.",
+        "Green no placar. Disciplina sempre.",
+        "Entrada batida! Parabéns a quem seguiu o plano.",
+        "Mais um green. Sem euforia, foco na próxima.",
+        "Mercado confirmou a leitura. Gestão em primeiro lugar.",
+    ),
+    "LOSS": (
+        "Faz parte. Loss registrado, sem gale, seguimos no plano.",
+        "O mercado não confirmou dessa vez. Gestão protege a banca.",
+        "Red no placar. Calma e disciplina para a próxima.",
+        "Nem toda entrada vai. O importante é respeitar o risco.",
+        "Loss registrado com transparência. Próxima com gestão.",
+    ),
+    "EMPATE": (
+        "Preço fechou igual à entrada. Valor devolvido.",
+    ),
+    "INDISPONIVEL": (
+        "Sem dados do candle para conferir. Fica fora do placar.",
+    ),
+}
+
+
 def format_result(result: dict[str, Any], session_results: list[dict[str, Any]]) -> str:
     return (
         f"{OUTCOME_LABEL[result['outcome']]} · {asset_label(result['asset'])} {brt(result['entry_time']):%H:%M}\n"
+        f"{random.choice(RESULT_PHRASES[result['outcome']])}\n"
         f"📊 Sessão: {fmt_tally(session_results)}"
     )
 
 
-def format_session_start(key: str, asset: str) -> str:
+def format_session_start(key: str, assets: list[str] | str) -> str:
     window = key.split(" ", 1)[1].replace("-", "–")
+    if isinstance(assets, str):
+        assets = [assets]
     return (
         "📡 <b>Radar ligado · Operações iniciando</b>\n\n"
-        f"Sessão {window} · {asset_label(asset)}\n"
+        f"Sessão {window}\n"
+        f"Pares: {', '.join(asset_label(a) for a in assets)}\n"
         "Fique atento aos sinais. Risco sugerido: até 2% da banca por entrada."
     )
 
@@ -407,6 +437,9 @@ def otp_unavailable(message: str) -> str:
     )
 
 
+DEFAULT_ASSETS = "EURUSD_otc,GBPUSD_otc,USDJPY_otc,AUDCAD_otc,EURJPY_otc"
+
+
 class RadarBot:
     def __init__(self) -> None:
         self.email = required_env("QUOTEX_EMAIL")
@@ -415,10 +448,11 @@ class RadarBot:
 
         self.host = os.getenv("QUOTEX_HOST", "quotex.com")
         self.proxies = parse_proxies(os.getenv("QUOTEX_PROXIES", ""))
-        self.asset = os.getenv("ASSET", "EURUSD_otc")
+        raw_assets = os.getenv("ASSETS", "").strip() or os.getenv("ASSET", "").strip() or DEFAULT_ASSETS
+        self.assets = [a.strip() for a in raw_assets.split(",") if a.strip()]
         self.period = int(os.getenv("PERIOD_SECONDS", "60"))
         self.offset = int(os.getenv("CANDLES_OFFSET_SECONDS", str(self.period * 120)))
-        self.expiry_minutes = int(os.getenv("EXPIRY_MINUTES", "5"))
+        self.expiry_minutes = int(os.getenv("EXPIRY_MINUTES", "2"))
         self.poll_seconds = max(3, int(os.getenv("POLL_SECONDS", "5")))
         self.min_confidence = int(os.getenv("MIN_CONFIDENCE", "3"))
         self.one_at_a_time = os.getenv("ONE_SIGNAL_AT_A_TIME", "true").lower() in ("1", "true", "sim", "yes")
@@ -432,8 +466,9 @@ class RadarBot:
         self.img_end = optional_path("IMG_END")
 
         self.store = Store(Path(os.getenv("DATA_DIR", "data")))
-        self._logged_format = False
-        self._candles: dict[int, dict[str, Any]] = {}
+        self._logged_format: set[str] = set()
+        self._short_assets: set[str] = set()
+        self._candles: dict[str, dict[int, dict[str, Any]]] = {}
         self._empty_ticks = 0
         # ~2 min sem nenhum candle = conexão provavelmente morta.
         self.max_empty_ticks = max(3, 120 // self.poll_seconds)
@@ -441,7 +476,7 @@ class RadarBot:
     # ---- sessões
 
     async def open_session(self, key: str) -> None:
-        text = format_session_start(key, self.asset)
+        text = format_session_start(key, self.assets)
         if self.img_start:
             await self.telegram.photo(self.img_start, text)
         else:
@@ -472,13 +507,15 @@ class RadarBot:
 
     # ---- resultados
 
-    async def resolve_pending(self, closed: list[dict[str, Any]]) -> None:
+    async def resolve_pending(self, closed: list[dict[str, Any]], asset: str | None = None) -> None:
         if not self.store.pending:
             return
         by_time = {int(c["time"]): c for c in closed}
         last_closed = int(closed[-1]["time"])
 
         for item in list(self.store.pending):
+            if asset is not None and item["asset"] != asset:
+                continue
             entry = item["entry_time"]
             final_candle = entry + item["expiry_minutes"] * 60 - self.period
             if last_closed < final_candle:
@@ -527,20 +564,22 @@ class RadarBot:
 
     # ---- sinais
 
-    async def maybe_signal(self, closed: list[dict[str, Any]], key: str) -> None:
-        if self.one_at_a_time and self.store.pending:
-            LOGGER.info("Aguardando resultado da entrada aberta; sem novo sinal.")
+    async def maybe_signal(self, closed: list[dict[str, Any]], key: str, asset: str | None = None) -> None:
+        asset = asset or self.assets[0]
+        # Uma entrada aberta por par: os outros pares continuam podendo sinalizar.
+        if self.one_at_a_time and any(p["asset"] == asset for p in self.store.pending):
+            LOGGER.info("%s: aguardando resultado da entrada aberta; sem novo sinal.", asset)
             return
 
         signal = analyze_closed_candles(
             closed,
-            asset=self.asset,
+            asset=asset,
             period_seconds=self.period,
             expiry_minutes=self.expiry_minutes,
             min_confidence=self.min_confidence,
         )
         if signal is None:
-            LOGGER.info("Candle %s sem confluência mínima.", int(closed[-1]["time"]))
+            LOGGER.debug("%s: candle %s sem confluência mínima.", asset, int(closed[-1]["time"]))
             return
 
         # Entrada na abertura do próximo candle cheio, para dar tempo de o membro abrir a corretora.
@@ -572,46 +611,65 @@ class RadarBot:
 
     # ---- loop
 
-    async def tick(self, client: Quotex) -> None:
+    async def fetch_closed(self, client: Quotex, asset: str, now_ts: float) -> tuple[bool, list[dict[str, Any]]]:
+        """Busca candles de um par e devolve (recebeu algo agora?, candles fechados acumulados)."""
         candles = await client.get_candles(
-            asset=self.asset,
+            asset=asset,
             end_from_time=time.time(),
             offset=self.offset,
             period=self.period,
+            timeout=15,
         )
-        raw = (getattr(getattr(client, "api", None), "candle_v2_data", None) or {}).get(self.asset)
-        if not self._logged_format and isinstance(raw, dict):
+        raw = (getattr(getattr(client, "api", None), "candle_v2_data", None) or {}).get(asset)
+        if asset not in self._logged_format and isinstance(raw, dict):
             sample = (raw.get("candles") or [None])[-1]
-            LOGGER.info("Histórico da Quotex: chaves %s, %s candles prontos, exemplo %s",
-                        sorted(raw.keys()), len(raw.get("candles") or []), sample)
-            self._logged_format = True
+            LOGGER.info("Histórico da Quotex (%s): chaves %s, %s candles prontos, exemplo %s",
+                        asset, sorted(raw.keys()), len(raw.get("candles") or []), sample)
+            self._logged_format.add(asset)
         candles = merge_history(candles or [], raw)
-        now_ts = time.time()
 
         # Guarda os candles entre ciclos: uma resposta vazia ou parcial da Quotex não apaga o histórico.
-        if candles:
+        stored = self._candles.setdefault(asset, {})
+        for candle in candles:
+            stored[candle["time"]] = candle
+        oldest = now_ts - self.offset - 10 * self.period
+        self._candles[asset] = stored = {t: c for t, c in stored.items() if t >= oldest}
+
+        # A pyquotex às vezes já descarta o candle em formação, às vezes não; por isso o filtro é
+        # pelo horário: só entra candle cujo período já terminou. Nunca use candle aberto.
+        closed = sorted(
+            (c for c in stored.values() if int(c["time"]) + self.period <= now_ts),
+            key=lambda c: int(c["time"]),
+        )
+        return bool(candles), closed
+
+    async def tick(self, client: Quotex) -> None:
+        now_ts = time.time()
+        closed_by_asset: dict[str, list[dict[str, Any]]] = {}
+        received_any = False
+        for asset in self.assets:
+            received, closed = await self.fetch_closed(client, asset, now_ts)
+            received_any = received_any or received
+            if len(closed) < 30:
+                if asset not in self._short_assets:
+                    LOGGER.warning("%s: candles fechados insuficientes (%s). Par ignorado por enquanto.",
+                                   asset, len(closed))
+                    self._short_assets.add(asset)
+                continue
+            if asset in self._short_assets:
+                LOGGER.info("%s: candles recebidos, par ativo.", asset)
+                self._short_assets.discard(asset)
+            closed_by_asset[asset] = closed
+
+        if received_any:
             self._empty_ticks = 0
         else:
             self._empty_ticks += 1
             if self._empty_ticks >= self.max_empty_ticks:
                 raise ReconnectNeeded(f"{self._empty_ticks} ciclos seguidos sem candles da Quotex")
-        for candle in candles:
-            self._candles[candle["time"]] = candle
-        oldest = now_ts - self.offset - 10 * self.period
-        self._candles = {t: c for t, c in self._candles.items() if t >= oldest}
 
-        # A pyquotex às vezes já descarta o candle em formação, às vezes não; por isso o filtro é
-        # pelo horário: só entra candle cujo período já terminou. Nunca use candle aberto.
-        closed = sorted(
-            (c for c in self._candles.values() if int(c["time"]) + self.period <= now_ts),
-            key=lambda c: int(c["time"]),
-        )
-        if len(closed) < 30:
-            LOGGER.warning("Candles fechados insuficientes: %s", len(closed))
-            return
-        last_closed = int(closed[-1]["time"])
-
-        await self.resolve_pending(closed)
+        for asset, closed in closed_by_asset.items():
+            await self.resolve_pending(closed, asset)
 
         now = datetime.now(BRT)
         window = current_window(now, self.windows)
@@ -627,9 +685,15 @@ class RadarBot:
             await self.open_session(key)
             open_key = key
 
-        if key and open_key == key and self.store.state["last_processed"] != last_closed:
-            await self.maybe_signal(closed, key)
-            self.store.state["last_processed"] = last_closed
+        if key and open_key == key and closed_by_asset:
+            processed = self.store.state.get("last_processed")
+            if not isinstance(processed, dict):
+                processed = self.store.state["last_processed"] = {}
+            for asset, closed in closed_by_asset.items():
+                last_closed = int(closed[-1]["time"])
+                if processed.get(asset) != last_closed:
+                    await self.maybe_signal(closed, key, asset)
+                    processed[asset] = last_closed
             self.store.save()
 
     async def connect(self) -> Quotex:
@@ -680,7 +744,7 @@ class RadarBot:
 
     async def run(self) -> None:
         client = await self.connect()
-        LOGGER.info("Conectado. Lendo somente candles de %s em %ss.", self.asset, self.period)
+        LOGGER.info("Conectado. Lendo somente candles de %s em %ss.", ", ".join(self.assets), self.period)
         try:
             while True:
                 try:
@@ -693,7 +757,7 @@ class RadarBot:
                         pass
                     self._empty_ticks = 0
                     client = await self.connect()
-                    LOGGER.info("Reconectado. Lendo somente candles de %s em %ss.", self.asset, self.period)
+                    LOGGER.info("Reconectado. Lendo somente candles de %s em %ss.", ", ".join(self.assets), self.period)
                 except Exception:
                     LOGGER.exception("Falha no ciclo; tentando novamente.")
                 await asyncio.sleep(self.poll_seconds)

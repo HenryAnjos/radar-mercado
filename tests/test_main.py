@@ -413,3 +413,78 @@ def test_tick_keeps_history_on_empty_response_and_reconnects(bot):
     with pytest.raises(ReconnectNeeded):
         for _ in range(bot.max_empty_ticks):
             asyncio.run(bot.tick(client))
+
+
+def test_format_result_random_phrase():
+    from src.main import RESULT_PHRASES, format_result
+
+    for outcome in ("WIN", "LOSS", "EMPATE", "INDISPONIVEL"):
+        result = {"outcome": outcome, "asset": "GBPUSD_otc", "entry_time": ENTRY}
+        lines = format_result(result, [result]).split("\n")
+        assert "GBP/USD (OTC)" in lines[0]
+        assert lines[1] in RESULT_PHRASES[outcome]
+        assert lines[2].startswith("📊 Sessão:")
+    # LOSS continua explícito na mensagem.
+    loss = {"outcome": "LOSS", "asset": "EURUSD_otc", "entry_time": ENTRY}
+    assert "LOSS" in format_result(loss, [loss])
+
+
+def test_format_session_start_lists_pairs():
+    from src.main import format_session_start
+
+    text = format_session_start("2026-10-14 09:00-11:00", ["EURUSD_otc", "USDJPY_otc"])
+    assert "Sessão 09:00–11:00" in text
+    assert "Pares: EUR/USD (OTC), USD/JPY (OTC)" in text
+
+
+def test_tick_multi_asset(bot, monkeypatch):
+    import time
+
+    import src.main as main
+
+    current = int(time.time()) // PERIOD * PERIOD
+    rows = [
+        {"time": current - i * PERIOD, "open": 1.1, "close": 1.1, "high": 1.2, "low": 1.0}
+        for i in range(40, 0, -1)
+    ]
+    bot.assets = ["EURUSD_otc", "GBPUSD_otc", "INVALIDO_otc"]
+    bot.store.state["last_processed"] = 123  # formato antigo (um só par)
+
+    async def get_candles(asset, **kwargs):
+        return [] if asset == "INVALIDO_otc" else rows
+
+    client = AsyncMock()
+    client.api.candle_v2_data = {}
+    client.get_candles.side_effect = get_candles
+    bot.resolve_pending = AsyncMock()
+    bot.maybe_signal = AsyncMock()
+    monkeypatch.setattr(main, "current_window", lambda now, windows: windows[0])
+
+    asyncio.run(bot.tick(client))
+
+    resolved = [call.args[1] for call in bot.resolve_pending.await_args_list]
+    signaled = [call.args[2] for call in bot.maybe_signal.await_args_list]
+    assert resolved == signaled == ["EURUSD_otc", "GBPUSD_otc"]
+    assert bot.store.state["last_processed"] == {
+        "EURUSD_otc": current - PERIOD,
+        "GBPUSD_otc": current - PERIOD,
+    }
+    # Mesmo candle de novo: não reavalia.
+    bot.maybe_signal.reset_mock()
+    asyncio.run(bot.tick(client))
+    bot.maybe_signal.assert_not_awaited()
+
+
+def test_one_open_entry_per_asset(bot):
+    add_pending(bot, "CALL")  # entrada aberta em EURUSD_otc
+    rows = candles(1.1, 1.1, count=40)
+    asyncio.run(bot.maybe_signal(rows, "2026-10-14 09:00-11:00", "EURUSD_otc"))
+    bot.telegram.text.assert_not_awaited()  # bloqueado: já tem entrada aberta nesse par
+
+
+def test_resolve_pending_only_matching_asset(bot):
+    add_pending(bot, "CALL")
+    asyncio.run(bot.resolve_pending(candles(1.1, 1.2), "GBPUSD_otc"))
+    assert len(bot.store.pending) == 1
+    asyncio.run(bot.resolve_pending(candles(1.1, 1.2), "EURUSD_otc"))
+    assert bot.store.pending == []
