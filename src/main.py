@@ -337,6 +337,14 @@ def format_result(result: dict[str, Any], session_results: list[dict[str, Any]])
     )
 
 
+def pairs_line(assets: list[str]) -> str:
+    labels = [asset_label(a).replace(" (OTC)", "") for a in assets]
+    otc = " OTC" if all(a.lower().endswith("_otc") for a in assets) else ""
+    if len(labels) <= 8:
+        return f"Pares{otc}: {', '.join(labels)}"
+    return f"{len(labels)} pares{otc}: {', '.join(labels[:6])} e mais {len(labels) - 6}"
+
+
 def format_session_start(key: str, assets: list[str] | str, max_gale: int = 0) -> str:
     window = key.split(" ", 1)[1].replace("-", "–")
     if isinstance(assets, str):
@@ -344,7 +352,7 @@ def format_session_start(key: str, assets: list[str] | str, max_gale: int = 0) -
     return (
         "📡 <b>Radar ligado · Operações iniciando</b>\n\n"
         f"Sessão {window}\n"
-        f"Pares: {', '.join(asset_label(a) for a in assets)}\n"
+        f"{pairs_line(assets)}\n"
         "Fique atento aos sinais. Risco sugerido: até 2% da banca "
         + (f"por ciclo (entrada + até {max_gale} gale{'s' if max_gale > 1 else ''})." if max_gale else "por entrada.")
     )
@@ -532,8 +540,12 @@ def otp_unavailable(message: str) -> str:
 
 
 DEFAULT_ASSETS = (
+    # Principais
     "EURUSD_otc,GBPUSD_otc,USDJPY_otc,AUDCAD_otc,EURJPY_otc,AUDUSD_otc,"
-    "USDCAD_otc,USDCHF_otc,EURGBP_otc,GBPJPY_otc,AUDJPY_otc,NZDUSD_otc"
+    "USDCAD_otc,USDCHF_otc,EURGBP_otc,GBPJPY_otc,AUDJPY_otc,NZDUSD_otc,"
+    # Exóticos OTC (nome inexistente na Quotex é pausado sozinho, com aviso no log)
+    "NZDCAD_otc,EURNZD_otc,USDBRL_otc,USDBDT_otc,USDNGN_otc,USDDZD_otc,"
+    "USDEGP_otc,USDARS_otc,USDZAR_otc,USDINR_otc,USDMXN_otc,USDTRY_otc"
 )
 
 

@@ -443,7 +443,11 @@ def test_format_session_start_lists_pairs():
 
     text = format_session_start("2026-10-14 09:00-11:00", ["EURUSD_otc", "USDJPY_otc"])
     assert "Sessão 09:00–11:00" in text
-    assert "Pares: EUR/USD (OTC), USD/JPY (OTC)" in text
+    assert "Pares OTC: EUR/USD, USD/JPY" in text
+
+    from src.main import DEFAULT_ASSETS
+    many = format_session_start("2026-10-14 09:00-11:00", DEFAULT_ASSETS.split(","))
+    assert "24 pares OTC: EUR/USD, GBP/USD, USD/JPY, AUD/CAD, EUR/JPY, AUD/USD e mais 18" in many
 
 
 def test_tick_multi_asset(bot, monkeypatch):
