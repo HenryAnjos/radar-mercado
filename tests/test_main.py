@@ -819,3 +819,16 @@ def test_signal_entry_is_3_minutes_ahead_with_5_min_expiry(bot, monkeypatch):
     monkeypatch.setattr(main, "analyze", lambda *a, **k: signal)
     _, entry = bot.evaluate([{"time": candle}], "EURUSD_otc")
     assert entry == candle + PERIOD + 180  # entrada 3 min depois do fechamento
+
+
+def test_images_default_to_assets_folder(monkeypatch, tmp_path):
+    import src.main as main
+
+    monkeypatch.setattr(main, "ASSETS_DIR", tmp_path / "assets")
+    (tmp_path / "assets").mkdir()
+    monkeypatch.delenv("IMG_WIN", raising=False)
+    assert main.optional_path("IMG_WIN", "win") is None  # sem arquivo: só texto
+    (tmp_path / "assets" / "win.jpg").write_bytes(b"x")
+    assert main.optional_path("IMG_WIN", "win") == tmp_path / "assets" / "win.jpg"
+    monkeypatch.setenv("IMG_WIN", "nenhuma")
+    assert main.optional_path("IMG_WIN", "win") is None

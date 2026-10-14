@@ -81,11 +81,28 @@ def required_env(name: str) -> str:
     return value
 
 
-def optional_path(name: str) -> Path | None:
+ASSETS_DIR = Path(__file__).resolve().parent.parent / "assets"
+IMAGE_SUFFIXES = (".png", ".jpg", ".jpeg")
+
+
+def optional_path(name: str, default_stem: str | None = None) -> Path | None:
+    """Imagem da variável `name`; sem variável, procura assets/<default_stem>.png/.jpg no repositório.
+    `name=nenhuma` desliga a imagem."""
     raw = os.getenv(name, "").strip()
+    if raw.lower() in ("nenhuma", "none", "off", "false"):
+        return None
     if not raw:
+        if default_stem:
+            for suffix in IMAGE_SUFFIXES:
+                candidate = ASSETS_DIR / f"{default_stem}{suffix}"
+                if candidate.is_file():
+                    LOGGER.info("%s: usando %s", name, candidate.relative_to(ASSETS_DIR.parent))
+                    return candidate
+            LOGGER.info("%s: sem imagem em assets/%s.png; enviando só texto.", name, default_stem)
         return None
     path = Path(raw)
+    if not path.is_absolute() and not path.is_file():
+        path = ASSETS_DIR.parent / raw
     if not path.is_file():
         LOGGER.warning("%s aponta para um arquivo que não existe: %s. Enviando só texto.", name, raw)
         return None
@@ -526,7 +543,8 @@ class Telegram:
         if caption:
             data.update(caption=caption, parse_mode="HTML")
         with path.open("rb") as file:
-            await self._call("sendPhoto", data, files={"photo": (path.name, file, "image/png")})
+            mime = "image/jpeg" if path.suffix.lower() in (".jpg", ".jpeg") else "image/png"
+            await self._call("sendPhoto", data, files={"photo": (path.name, file, mime)})
 
 
 # ---------------------------------------------------------------- bot
@@ -584,9 +602,9 @@ class RadarBot:
         self.title = os.getenv("SIGNAL_TITLE", "SINAL GRÁTIS")
         self.broker_link = os.getenv("BROKER_LINK", "").strip()
         self.tutorial_link = os.getenv("TUTORIAL_LINK", "").strip()
-        self.img_start = optional_path("IMG_START")
-        self.img_win = optional_path("IMG_WIN")
-        self.img_end = optional_path("IMG_END")
+        self.img_start = optional_path("IMG_START", "operacoes-iniciando")
+        self.img_win = optional_path("IMG_WIN", "win")
+        self.img_end = optional_path("IMG_END", "operacoes-encerradas")
 
         data_dir = Path(os.getenv("DATA_DIR", "data"))
         self.store = Store(data_dir)
