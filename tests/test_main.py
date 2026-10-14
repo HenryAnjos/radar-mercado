@@ -222,6 +222,7 @@ def test_tick_ignores_open_candle(bot):
     ]
     client = AsyncMock()
     client.get_candles.return_value = list(reversed(rows))  # ordem não garantida
+    client.api.candle_v2_data = {}
     bot.resolve_pending = AsyncMock()
 
     asyncio.run(bot.tick(client))
@@ -317,3 +318,26 @@ def test_connect_rotates_proxies(bot, monkeypatch):
     assert used == ["http://u:p@1.1.1.1:1", "http://u:p@2.2.2.2:2"] * 2
     assert sleeps == [15, 60, 15]  # próximo proxy rápido; espera longa só após a volta completa
     assert "api.telegram.org" in os.environ["NO_PROXY"]
+
+
+def test_merge_history_uses_raw_candles():
+    from src.main import merge_history
+
+    ticks = [  # pyquotex: poucos candles montados por ticks; o primeiro pode estar incompleto
+        {"time": 180, "open": 9.0, "close": 1.3, "high": 9.0, "low": 1.0, "ticks": 3},
+        {"time": 240, "open": 1.3, "close": 1.4, "high": 1.5, "low": 1.2, "ticks": 9},
+    ]
+    raw = {
+        "asset": "EURUSD_otc",
+        "candles": [
+            [60, 1.0, 1.1, 1.2, 0.9, 30],
+            [120, 1.1, 1.2, 1.3, 1.0, 30],
+            [180, 1.2, 1.3, 1.4, 1.1, 30],
+            [300, 1.0, 2.0, 1.5, 0.5],  # high < close: ordem inesperada, descarta
+            "lixo",
+        ],
+    }
+    merged = merge_history(ticks, raw)
+    assert [c["time"] for c in merged] == [60, 120, 180, 240]
+    assert merged[2] == {"time": 180, "open": 1.2, "close": 1.3, "high": 1.4, "low": 1.1}
+    assert merge_history(ticks, None)[0]["open"] == 9.0

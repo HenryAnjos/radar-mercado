@@ -97,6 +97,44 @@ def use_proxy(proxy: str) -> None:
     os.environ["NO_PROXY"] = os.environ["no_proxy"] = ",".join(no_proxy)
 
 
+# ---------------------------------------------------------------- candles
+
+def parse_raw_candle(row: Any) -> dict[str, Any] | None:
+    """Candle do histórico da Quotex: lista [time, open, close, high, low, ...] ou dict."""
+    try:
+        if isinstance(row, (list, tuple)) and len(row) >= 5:
+            candle = {"time": int(row[0]), "open": float(row[1]), "close": float(row[2]),
+                      "high": float(row[3]), "low": float(row[4])}
+        elif isinstance(row, dict) and "time" in row:
+            candle = {"time": int(row["time"]), "open": float(row["open"]), "close": float(row["close"]),
+                      "high": float(row["high"]), "low": float(row["low"])}
+        else:
+            return None
+    except (KeyError, TypeError, ValueError):
+        return None
+    # Protege contra ordem de campos diferente da esperada.
+    if candle["high"] < max(candle["open"], candle["close"]) or candle["low"] > min(candle["open"], candle["close"]):
+        return None
+    return candle
+
+
+def merge_history(tick_candles: list[dict[str, Any]], raw: Any) -> list[dict[str, Any]]:
+    """Junta os candles prontos do histórico (que a pyquotex descarta por virem como lista)
+    com os candles que ela monta a partir de ticks recentes. Em conflito vale o do histórico,
+    porque o primeiro candle montado por ticks pode estar incompleto."""
+    merged: dict[int, dict[str, Any]] = {}
+    for row in tick_candles or []:
+        candle = parse_raw_candle(row)
+        if candle:
+            merged[candle["time"]] = candle
+    if isinstance(raw, dict):
+        for row in raw.get("candles") or []:
+            candle = parse_raw_candle(row)
+            if candle:
+                merged[candle["time"]] = candle
+    return sorted(merged.values(), key=lambda c: c["time"])
+
+
 # ---------------------------------------------------------------- janelas
 
 def parse_windows(raw: str) -> list[Window]:
@@ -380,6 +418,7 @@ class RadarBot:
         self.img_end = optional_path("IMG_END")
 
         self.store = Store(Path(os.getenv("DATA_DIR", "data")))
+        self._logged_format = False
 
     # ---- sessões
 
@@ -522,6 +561,13 @@ class RadarBot:
             offset=self.offset,
             period=self.period,
         )
+        raw = (getattr(getattr(client, "api", None), "candle_v2_data", None) or {}).get(self.asset)
+        if not self._logged_format and isinstance(raw, dict):
+            sample = (raw.get("candles") or [None])[-1]
+            LOGGER.info("Histórico da Quotex: chaves %s, %s candles prontos, exemplo %s",
+                        sorted(raw.keys()), len(raw.get("candles") or []), sample)
+            self._logged_format = True
+        candles = merge_history(candles or [], raw)
         # A pyquotex às vezes já descarta o candle em formação, às vezes não; por isso o filtro é
         # pelo horário: só entra candle cujo período já terminou. Nunca use candle aberto.
         now_ts = time.time()
