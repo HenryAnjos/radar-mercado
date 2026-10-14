@@ -1,0 +1,5 @@
+# Python 3.12+
+# pyquotex fixada no commit revisado em 2026-10-14 (v1.1.0). Revise o diff antes de atualizar o hash.
+pyquotex @ git+https://github.com/cleitonleonel/pyquotex.git@a50a030b425937fec4595b1ff1c226e160c52943
+httpx>=0.27,<1
+python-dotenv>=1.0,<2
