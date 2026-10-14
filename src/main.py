@@ -60,6 +60,43 @@ def optional_path(name: str) -> Path | None:
     return path
 
 
+def parse_proxies(raw: str) -> list[str]:
+    """Aceita `ip:porta:usuario:senha` (formato de lista do Webshare) ou URLs `http://usuario:senha@ip:porta`."""
+    proxies: list[str] = []
+    for item in raw.replace("\n", ",").replace(" ", ",").split(","):
+        item = item.strip()
+        if not item:
+            continue
+        if "://" in item:
+            proxies.append(item)
+            continue
+        parts = item.split(":")
+        if len(parts) == 4:
+            host, port, user, password = parts
+            proxies.append(f"http://{user}:{password}@{host}:{port}")
+        elif len(parts) == 2:
+            proxies.append(f"http://{item}")
+        else:
+            raise ConfigError("Proxy inválido em QUOTEX_PROXIES. Use ip:porta:usuario:senha separados por vírgula.")
+    return proxies
+
+
+def proxy_label(proxy: str) -> str:
+    """Só host:porta, para o log nunca mostrar usuário e senha."""
+    return proxy.rsplit("@", 1)[-1].split("://", 1)[-1]
+
+
+def use_proxy(proxy: str) -> None:
+    # curl_cffi (login e websocket da pyquotex) lê o proxy das variáveis de ambiente a cada conexão.
+    os.environ["HTTPS_PROXY"] = os.environ["https_proxy"] = proxy
+    os.environ["HTTP_PROXY"] = os.environ["http_proxy"] = proxy
+    # O Telegram não bloqueia o servidor; não gasta dados do proxy com ele.
+    no_proxy = [h for h in os.getenv("NO_PROXY", "").split(",") if h.strip()]
+    if "api.telegram.org" not in no_proxy:
+        no_proxy.append("api.telegram.org")
+    os.environ["NO_PROXY"] = os.environ["no_proxy"] = ",".join(no_proxy)
+
+
 # ---------------------------------------------------------------- janelas
 
 def parse_windows(raw: str) -> list[Window]:
@@ -325,6 +362,7 @@ class RadarBot:
         self.telegram = Telegram(required_env("TELEGRAM_BOT_TOKEN"), required_env("TELEGRAM_CHAT_ID"))
 
         self.host = os.getenv("QUOTEX_HOST", "quotex.com")
+        self.proxies = parse_proxies(os.getenv("QUOTEX_PROXIES", ""))
         self.asset = os.getenv("ASSET", "EURUSD_otc")
         self.period = int(os.getenv("PERIOD_SECONDS", "60"))
         self.offset = int(os.getenv("CANDLES_OFFSET_SECONDS", str(self.period * 120)))
@@ -520,7 +558,14 @@ class RadarBot:
     async def connect(self) -> Quotex:
         """Tenta logar com espera crescente, para não martelar a Quotex (e piorar um bloqueio) em loop."""
         delay = 60
+        attempt = 0
         while True:
+            via = ""
+            if self.proxies:
+                proxy = self.proxies[attempt % len(self.proxies)]
+                use_proxy(proxy)
+                via = f" via proxy {proxy_label(proxy)} ({attempt % len(self.proxies) + 1}/{len(self.proxies)})"
+            attempt += 1
             client = Quotex(
                 email=self.email,
                 password=self.password,
@@ -528,7 +573,7 @@ class RadarBot:
                 host=self.host,
                 on_otp_callback=otp_unavailable,
             )
-            LOGGER.info("Conectando na Quotex (%s)...", self.host)
+            LOGGER.info("Conectando na Quotex (%s)%s...", self.host, via)
             try:
                 connected, message = await asyncio.wait_for(client.connect(), timeout=180)
             except asyncio.TimeoutError:
@@ -538,11 +583,17 @@ class RadarBot:
             if connected:
                 return client
 
-            LOGGER.error("Não foi possível conectar na Quotex: %s. Nova tentativa em %s min.", message, delay // 60)
             try:
                 await client.close()
             except Exception:
                 pass
+
+            # Com lista de proxies, testa o próximo logo; só espera mais depois de uma volta completa.
+            if self.proxies and attempt % len(self.proxies):
+                LOGGER.error("Não foi possível conectar na Quotex: %s. Testando o próximo proxy.", message)
+                await asyncio.sleep(15)
+                continue
+            LOGGER.error("Não foi possível conectar na Quotex: %s. Nova tentativa em %s min.", message, delay // 60)
             await asyncio.sleep(delay)
             delay = min(delay * 2, 30 * 60)
 

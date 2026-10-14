@@ -272,3 +272,48 @@ def test_connect_retries_with_growing_delay(bot, monkeypatch):
     assert isinstance(client, FakeQuotex)
     assert len(attempts) == 3
     assert sleeps == [60, 120]
+
+
+def test_parse_proxies_and_label():
+    from src.main import parse_proxies, proxy_label
+
+    proxies = parse_proxies("1.2.3.4:6014:user:pass, http://u:p@5.6.7.8:80\n9.9.9.9:3128")
+    assert proxies == ["http://user:pass@1.2.3.4:6014", "http://u:p@5.6.7.8:80", "http://9.9.9.9:3128"]
+    assert [proxy_label(p) for p in proxies] == ["1.2.3.4:6014", "5.6.7.8:80", "9.9.9.9:3128"]
+    assert parse_proxies("") == []
+    with pytest.raises(ConfigError):
+        parse_proxies("1.2.3.4:80:user")
+
+
+def test_connect_rotates_proxies(bot, monkeypatch):
+    import os
+    import src.main as main
+
+    for name in ("HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy", "NO_PROXY", "no_proxy"):
+        monkeypatch.setenv(name, "")
+    bot.proxies = main.parse_proxies("1.1.1.1:1:u:p,2.2.2.2:2:u:p")
+    used = []
+
+    class FakeQuotex:
+        def __init__(self, **kwargs):
+            pass
+
+        async def connect(self):
+            used.append(os.environ["HTTPS_PROXY"])
+            return len(used) == 4, "HTTP 403: blocked by Cloudflare"
+
+        async def close(self):
+            return True
+
+    sleeps = []
+
+    async def fake_sleep(seconds):
+        sleeps.append(seconds)
+
+    monkeypatch.setattr(main, "Quotex", FakeQuotex)
+    monkeypatch.setattr(main.asyncio, "sleep", fake_sleep)
+
+    asyncio.run(bot.connect())
+    assert used == ["http://u:p@1.1.1.1:1", "http://u:p@2.2.2.2:2"] * 2
+    assert sleeps == [15, 60, 15]  # próximo proxy rápido; espera longa só após a volta completa
+    assert "api.telegram.org" in os.environ["NO_PROXY"]
