@@ -719,3 +719,86 @@ def test_unresponsive_asset_is_paused(bot):
         asyncio.run(bot.tick(client))
     assert calls.count("XXXYYY_otc") == 3  # depois de 3 falhas seguidas fica pausado
     assert calls.count("EURUSD_otc") == 5
+
+
+def add_gale_pending(radar, direction="CALL", max_gale=2, expiry=2):
+    radar.store.pending.append({
+        "id": f"EURUSD_otc-{ENTRY}", "session": "2026-10-14 09:00-11:00", "asset": "EURUSD_otc",
+        "direction": direction, "entry_time": ENTRY, "expiry_minutes": expiry, "max_gale": max_gale, "gale": 0,
+    })
+
+
+def gale_candles(level_moves, expiry=2):
+    """Candles com o movimento (+1 sobe / -1 cai) de cada nível: entrada, G1, G2."""
+    rows, price, t = [], 1.1, ENTRY
+    for move in level_moves:
+        for i in range(expiry):
+            close = price + (0.0001 * move if i == expiry - 1 else 0)
+            rows.append({"time": t, "open": price, "close": close, "high": max(price, close) + 1e-4,
+                         "low": min(price, close) - 1e-4})
+            price, t = close, t + PERIOD
+    return rows
+
+
+def test_gale_win_on_g1(bot):
+    add_gale_pending(bot, "CALL")
+    asyncio.run(bot.resolve_pending(gale_candles([-1])))  # entrada perdeu -> G1
+    assert bot.store.pending[0]["gale"] == 1
+    gale_msg = bot.telegram.text.await_args.args[0]
+    assert "GALE 1" in gale_msg and "EUR/USD (OTC)" in gale_msg
+    assert bot.store.events("result") == []
+
+    asyncio.run(bot.resolve_pending(gale_candles([-1, 1])))  # G1 ganhou
+    results = bot.store.events("result")
+    assert [(r["outcome"], r["gale"]) for r in results] == [("WIN", 1)]
+    assert results[0]["entry_time"] == ENTRY  # placar registra pelo horário do sinal
+    assert "WIN</b> no G1" in bot.telegram.text.await_args.args[0]
+    assert bot.store.pending == []
+
+
+def test_gale_loss_after_g2(bot):
+    add_gale_pending(bot, "PUT")
+    rows = gale_candles([1, 1, 1])
+    asyncio.run(bot.resolve_pending(rows[:2]))
+    asyncio.run(bot.resolve_pending(rows[:4]))
+    asyncio.run(bot.resolve_pending(rows))
+    results = bot.store.events("result")
+    assert [(r["outcome"], r["gale"]) for r in results] == [("LOSS", 2)]
+    assert "LOSS</b> (após G2)" in bot.telegram.text.await_args.args[0]
+
+
+def test_direct_win_and_no_gale_mode(bot):
+    add_gale_pending(bot, "CALL")
+    asyncio.run(bot.resolve_pending(gale_candles([1])))
+    assert "WIN</b> direto" in bot.telegram.text.await_args.args[0]
+    # Sem gale (MAX_GALE=0): LOSS encerra na hora, sem mensagem de gale.
+    bot.telegram.text.reset_mock()
+    add_gale_pending(bot, "CALL", max_gale=0)
+    asyncio.run(bot.resolve_pending(gale_candles([-1])))
+    texts = [c.args[0] for c in bot.telegram.text.await_args_list]
+    assert not any("GALE" in t for t in texts)
+    assert bot.store.events("result")[-1]["outcome"] == "LOSS"
+
+
+def test_signal_and_report_show_gale():
+    from src.main import format_report, format_signal
+    from src.strategy import Signal
+
+    signal = Signal("EURUSD_otc", "CALL", ENTRY - 2 * PERIOD, PERIOD, 2, 3, ("x",))
+    text = format_signal(signal, ENTRY, "SINAL GRÁTIS", "", "", max_gale=2)
+    assert "Até 2 gales: G1 09:02 · G2 09:04" in text
+    assert "7x a entrada" in text and "sem gale" not in text
+    assert "sem gale" in format_signal(signal, ENTRY, "SINAL GRÁTIS", "", "", max_gale=0)
+
+    signals = [{"id": i, "asset": "EURUSD_otc", "direction": "CALL", "entry_time": ENTRY + n * 600}
+               for n, i in enumerate("abcd")]
+    results = [
+        {"id": "a", "outcome": "WIN", "gale": 0, "max_gale": 2},
+        {"id": "b", "outcome": "WIN", "gale": 1, "max_gale": 2},
+        {"id": "c", "outcome": "WIN", "gale": 2, "max_gale": 2},
+        {"id": "d", "outcome": "LOSS", "gale": 2, "max_gale": 2},
+    ]
+    report = format_report("2026-10-14 09:00-11:00", signals, results, results, results)
+    assert "✅ Wins: 3 (direto 1 · G1 1 · G2 1)" in report
+    assert "❌ Losses: 1" in report
+    assert "COMPRA · ✅ G1" in report

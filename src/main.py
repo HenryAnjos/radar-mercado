@@ -260,15 +260,30 @@ OUTCOME_LABEL = {
 OUTCOME_ICON = {"WIN": "✅", "LOSS": "❌", "EMPATE": "➖", "INDISPONIVEL": "⚠️"}
 
 
-def format_signal(signal: Signal, entry_time: int, title: str, broker_link: str, tutorial_link: str) -> str:
+def gale_label(level: int) -> str:
+    return "direto" if level == 0 else f"G{level}"
+
+
+def format_signal(signal: Signal, entry_time: int, title: str, broker_link: str, tutorial_link: str,
+                  max_gale: int = 0) -> str:
     lines = [
         f"📡 <b><i>{html.escape(title)}</i></b>",
         "",
         "🕐 Horário de Brasília (UTC-3)",
         f"⏱ Expiração: <b>{signal.expiry_minutes} min</b>",
         f"📊 <b>{asset_label(signal.asset)} · {brt(entry_time):%H:%M} · {DIRECTION_LABEL[signal.direction]}</b>",
-        "💼 Risco: até 2% da banca · sem gale",
     ]
+    if max_gale:
+        gale_times = " · ".join(
+            f"G{n} {brt(entry_time + n * signal.expiry_minutes * 60):%H:%M}" for n in range(1, max_gale + 1)
+        )
+        lines += [
+            f"🔁 Até {max_gale} gale{'s' if max_gale > 1 else ''}: {gale_times}",
+            # Com gale o risco é do ciclo inteiro: entrada + gales somados podem chegar a 2^(n+1)-1 entradas.
+            f"💼 Risco: o ciclo completo (entrada + gales = {2 ** (max_gale + 1) - 1}x a entrada) até 2% da banca",
+        ]
+    else:
+        lines.append("💼 Risco: até 2% da banca · sem gale")
     if broker_link or tutorial_link:
         lines.append("")
     if broker_link:
@@ -290,7 +305,7 @@ RESULT_PHRASES = {
         "Mercado confirmou a leitura. Gestão em primeiro lugar.",
     ),
     "LOSS": (
-        "Faz parte. Loss registrado, sem gale, seguimos no plano.",
+        "Faz parte. Loss registrado, seguimos no plano.",
         "O mercado não confirmou dessa vez. Gestão protege a banca.",
         "Red no placar. Calma e disciplina para a próxima.",
         "Nem toda entrada vai. O importante é respeitar o risco.",
@@ -306,14 +321,23 @@ RESULT_PHRASES = {
 
 
 def format_result(result: dict[str, Any], session_results: list[dict[str, Any]]) -> str:
+    level = result.get("gale", 0)
+    label = OUTCOME_LABEL[result["outcome"]]
+    if result.get("max_gale"):
+        if result["outcome"] == "WIN":
+            label += " direto" if level == 0 else f" no G{level}"
+        elif result["outcome"] == "LOSS":
+            label += f" (após G{level})"
+        elif level:
+            label += f" no G{level}"
     return (
-        f"{OUTCOME_LABEL[result['outcome']]} · {asset_label(result['asset'])} {brt(result['entry_time']):%H:%M}\n"
+        f"{label} · {asset_label(result['asset'])} {brt(result['entry_time']):%H:%M}\n"
         f"{random.choice(RESULT_PHRASES[result['outcome']])}\n"
         f"📊 Sessão: {fmt_tally(session_results)}"
     )
 
 
-def format_session_start(key: str, assets: list[str] | str) -> str:
+def format_session_start(key: str, assets: list[str] | str, max_gale: int = 0) -> str:
     window = key.split(" ", 1)[1].replace("-", "–")
     if isinstance(assets, str):
         assets = [assets]
@@ -321,7 +345,8 @@ def format_session_start(key: str, assets: list[str] | str) -> str:
         "📡 <b>Radar ligado · Operações iniciando</b>\n\n"
         f"Sessão {window}\n"
         f"Pares: {', '.join(asset_label(a) for a in assets)}\n"
-        "Fique atento aos sinais. Risco sugerido: até 2% da banca por entrada."
+        "Fique atento aos sinais. Risco sugerido: até 2% da banca "
+        + (f"por ciclo (entrada + até {max_gale} gale{'s' if max_gale > 1 else ''})." if max_gale else "por entrada.")
     )
 
 
@@ -343,9 +368,16 @@ def format_report(
         ]
     else:
         wins, losses, draws = tally(session_results)
+        win_levels = [r.get("gale", 0) for r in session_results if r["outcome"] == "WIN"]
+        breakdown = ""
+        if any(r.get("max_gale") for r in session_results):
+            top = max(r.get("max_gale", 0) for r in session_results)
+            breakdown = " (" + " · ".join(
+                f"{gale_label(n)} {win_levels.count(n)}" for n in range(top + 1)
+            ) + ")"
         lines += [
             "<b>Sessão</b>",
-            f"✅ Wins: {wins}",
+            f"✅ Wins: {wins}{breakdown}",
             f"❌ Losses: {losses}",
         ]
         if draws:
@@ -360,6 +392,9 @@ def format_report(
         for s in shown:
             outcome = by_id.get(s["id"], {}).get("outcome")
             icon = OUTCOME_ICON.get(outcome, "⏳")
+            level = by_id.get(s["id"], {}).get("gale", 0)
+            if level and outcome in ("WIN", "EMPATE"):
+                icon += f" G{level}"
             lines.append(
                 f"{brt(s['entry_time']):%H:%M} · {asset_label(s['asset'])} · "
                 f"{DIRECTION_LABEL[s['direction']].split(' ', 1)[1]} · {icon}"
@@ -520,6 +555,8 @@ class RadarBot:
         self.one_at_a_time = os.getenv("ONE_SIGNAL_AT_A_TIME", "true").lower() in ("1", "true", "sim", "yes")
         # Total de entradas abertas ao mesmo tempo (somando todos os pares) e intervalo mínimo entre sinais.
         self.max_open_entries = max(1, int(os.getenv("MAX_OPEN_ENTRIES", "1")))
+        # Martingale: quantos gales depois da entrada (0 = sem gale). O placar mostra em qual nível ganhou.
+        self.max_gale = min(3, max(0, int(os.getenv("MAX_GALE", "2"))))
         # auto = escolhe pelo tipo de mercado (ADX): tendência → pullback; lateral → reversão à média.
         self.strategy = os.getenv("STRATEGY", "auto").strip().lower()
         if self.strategy not in STRATEGIES:
@@ -560,7 +597,7 @@ class RadarBot:
     # ---- sessões
 
     async def open_session(self, key: str) -> None:
-        text = format_session_start(key, self.assets)
+        text = format_session_start(key, self.assets, self.max_gale)
         if self.img_start:
             await self.telegram.photo(self.img_start, text)
         else:
@@ -600,7 +637,10 @@ class RadarBot:
         for item in list(self.store.pending):
             if asset is not None and item["asset"] != asset:
                 continue
-            entry = item["entry_time"]
+            level = item.get("gale", 0)
+            max_gale = item.get("max_gale", 0)
+            # Cada gale entra na abertura do candle seguinte ao fim da expiração anterior.
+            entry = item["entry_time"] + level * item["expiry_minutes"] * 60
             final_candle = entry + item["expiry_minutes"] * 60 - self.period
             if last_closed < final_candle:
                 continue
@@ -622,13 +662,26 @@ class RadarBot:
             else:
                 continue  # o candle pode ainda chegar no próximo ciclo
 
+            if outcome == "LOSS" and level < max_gale:
+                item["gale"] = level + 1
+                self.store.save()
+                next_entry = entry + item["expiry_minutes"] * 60
+                await self.telegram.text(
+                    f"🔁 <b>GALE {level + 1}</b> · {asset_label(item['asset'])} · {brt(next_entry):%H:%M} · "
+                    f"{DIRECTION_LABEL[item['direction']]}"
+                )
+                LOGGER.info("Gale %s: %s %s entrada %s", level + 1, item["asset"], item["direction"], brt(next_entry))
+                continue
+
             result = {
                 "type": "result",
                 "id": item["id"],
                 "session": item["session"],
                 "asset": item["asset"],
                 "direction": item["direction"],
-                "entry_time": entry,
+                "entry_time": item["entry_time"],
+                "gale": level,
+                "max_gale": max_gale,
                 "open_price": open_price,
                 "close_price": close_price,
                 "outcome": outcome,
@@ -644,7 +697,7 @@ class RadarBot:
             self.store.append(result)
             self.store.pending.remove(item)
             self.store.save()
-            LOGGER.info("Resultado %s: %s %s", outcome, item["asset"], item["direction"])
+            LOGGER.info("Resultado %s (%s): %s %s", outcome, gale_label(level), item["asset"], item["direction"])
 
     # ---- sinais
 
@@ -691,7 +744,7 @@ class RadarBot:
 
     async def send_signal(self, signal: Signal, entry_time: int, key: str) -> None:
         await self.telegram.text(
-            format_signal(signal, entry_time, self.title, self.broker_link, self.tutorial_link)
+            format_signal(signal, entry_time, self.title, self.broker_link, self.tutorial_link, self.max_gale)
         )
         record = {
             "type": "signal",
@@ -704,11 +757,15 @@ class RadarBot:
             "expiry_minutes": signal.expiry_minutes,
             "confidence": signal.confidence,
             "strategy": signal.strategy,
+            "max_gale": self.max_gale,
             "reasons": list(signal.reasons),
             "sent_at": datetime.now(BRT).isoformat(),
         }
         self.store.append(record)
-        self.store.pending.append({k: record[k] for k in ("id", "session", "asset", "direction", "entry_time", "expiry_minutes")})
+        self.store.pending.append(
+            {k: record[k] for k in ("id", "session", "asset", "direction", "entry_time", "expiry_minutes", "max_gale")}
+            | {"gale": 0}
+        )
         self.store.state["last_signal_at"] = time.time()
         self.store.save()
         LOGGER.info("Sinal enviado: %s %s entrada %s", signal.asset, signal.direction, brt(entry_time))

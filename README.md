@@ -77,7 +77,9 @@ dos dados. Só vale trocar a configuração se a variação for melhor nas duas 
 ## Avisos
 
 - As estratégias em `src/strategy.py` (auto, tendencia, reversao, classica) não foram validadas com dados reais. Rode o backtest antes do grupo oficial.
-- Não use martingale nem a função `buy()` da PyQuotex.
+- Nunca use a função `buy()` da PyQuotex: o bot só lê candles.
+- Gale (`MAX_GALE`, padrão 2) não melhora a estratégia: aumenta a taxa de acerto exibida, mas um LOSS depois
+  do G2 custa 7x a entrada. O relatório mostra em que nível cada WIN saiu e o LOSS aparece como "após G2".
 - Se a Quotex pedir código PIN/2FA no login, o bot para com erro claro (não há terminal no servidor). Use uma conta demo sem 2FA.
 - A PyQuotex está fixada num commit revisado em `requirements.txt`. Antes de trocar o hash, revise o diff da biblioteca.
 - Para rodar todos os dias, use um servidor (VPS) ou deixe o PC ligado nos horários das sessões.
