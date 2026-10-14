@@ -56,10 +56,23 @@ python -m pytest -q
 4. Mantenha **1 réplica**. Duas instâncias mandariam sinais duplicados.
 5. Acompanhe a aba **Logs**: deve aparecer "Conectado. Lendo somente candles…".
 
+## Backtest
+
+O bot grava os candles de todos os pares em `DATA_DIR/candles/`. Depois de um ou dois dias rodando:
+
+```
+python -m src.backtest
+```
+
+No Railway, rode na aba **Console** do serviço. A ferramenta compara variações (confirmações, expiração,
+filtro de tendência, filtro de mercado parado) e mostra a taxa de acerto nos primeiros 70% e nos últimos 30%
+dos dados. Só vale trocar a configuração se a variação for melhor nas duas partes.
+
 ## Arquivos de auditoria (`data/`)
 
 - `state.json`: sessão aberta, entradas aguardando resultado e último candle lido. Permite reiniciar sem perder nada.
 - `events.jsonl`: todos os sinais e resultados, em ordem. Nunca apague losses daqui.
+- `candles/`: candles fechados de cada par, para o backtest.
 
 ## Avisos
 

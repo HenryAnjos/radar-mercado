@@ -354,6 +354,9 @@ class Store:
         data_dir.mkdir(parents=True, exist_ok=True)
         self.state_path = data_dir / "state.json"
         self.events_path = data_dir / "events.jsonl"
+        self.candles_dir = data_dir / "candles"
+        self.candles_dir.mkdir(exist_ok=True)
+        self._recorded: dict[str, int] = {}
         self.state = self._load_state()
 
     def _load_state(self) -> dict[str, Any]:
@@ -377,6 +380,32 @@ class Store:
     def append(self, event: dict[str, Any]) -> None:
         with self.events_path.open("a", encoding="utf-8") as file:
             file.write(json.dumps(event, ensure_ascii=False) + "\n")
+
+    def _candles_path(self, asset: str) -> Path:
+        safe = "".join(ch for ch in asset if ch.isalnum() or ch in "_-")
+        return self.candles_dir / f"{safe}.jsonl"
+
+    def record_candles(self, asset: str, closed: list[dict[str, Any]]) -> None:
+        """Grava candles fechados ainda não gravados (base para o backtest em src/backtest.py)."""
+        last = self._recorded.get(asset)
+        if last is None:
+            last = 0
+            path = self._candles_path(asset)
+            if path.exists():
+                lines = path.read_text(encoding="utf-8").strip().splitlines()
+                if lines:
+                    try:
+                        last = int(json.loads(lines[-1])["time"])
+                    except (ValueError, KeyError):
+                        last = 0
+        new = [c for c in closed if int(c["time"]) > last]
+        if not new:
+            self._recorded[asset] = last
+            return
+        with self._candles_path(asset).open("a", encoding="utf-8") as file:
+            for c in new:
+                file.write(json.dumps({k: c[k] for k in ("time", "open", "close", "high", "low")}) + "\n")
+        self._recorded[asset] = int(new[-1]["time"])
 
     def events(self, kind: str) -> list[dict[str, Any]]:
         if not self.events_path.exists():
@@ -456,6 +485,12 @@ class RadarBot:
         self.poll_seconds = max(3, int(os.getenv("POLL_SECONDS", "5")))
         self.min_confidence = int(os.getenv("MIN_CONFIDENCE", "3"))
         self.one_at_a_time = os.getenv("ONE_SIGNAL_AT_A_TIME", "true").lower() in ("1", "true", "sim", "yes")
+        # Total de entradas abertas ao mesmo tempo (somando todos os pares) e intervalo mínimo entre sinais.
+        self.max_open_entries = max(1, int(os.getenv("MAX_OPEN_ENTRIES", "1")))
+        # Filtros opcionais da estratégia (ligue só depois de o backtest mostrar que ajudam).
+        self.trend_filter = os.getenv("TREND_FILTER", "false").lower() in ("1", "true", "sim", "yes")
+        self.min_volatility = float(os.getenv("MIN_VOLATILITY", "0"))
+        self.cooldown_seconds = max(0, int(os.getenv("SIGNAL_COOLDOWN_MINUTES", "0"))) * 60
         self.windows = parse_windows(os.getenv("ALLOWED_WINDOWS", "09:00-11:00"))
 
         self.title = os.getenv("SIGNAL_TITLE", "SINAL GRÁTIS")
@@ -565,12 +600,11 @@ class RadarBot:
 
     # ---- sinais
 
-    async def maybe_signal(self, closed: list[dict[str, Any]], key: str, asset: str | None = None) -> None:
-        asset = asset or self.assets[0]
-        # Uma entrada aberta por par: os outros pares continuam podendo sinalizar.
+    def evaluate(self, closed: list[dict[str, Any]], asset: str) -> tuple[Signal, int] | None:
+        """Analisa um par e devolve (sinal, horário de entrada) se ele puder ser enviado agora."""
+        # No máximo uma entrada aberta por par.
         if self.one_at_a_time and any(p["asset"] == asset for p in self.store.pending):
-            LOGGER.info("%s: aguardando resultado da entrada aberta; sem novo sinal.", asset)
-            return
+            return None
 
         signal = analyze_closed_candles(
             closed,
@@ -578,17 +612,33 @@ class RadarBot:
             period_seconds=self.period,
             expiry_minutes=self.expiry_minutes,
             min_confidence=self.min_confidence,
+            trend_filter=self.trend_filter,
+            min_volatility=self.min_volatility,
         )
         if signal is None:
             LOGGER.debug("%s: candle %s sem confluência mínima.", asset, int(closed[-1]["time"]))
-            return
+            return None
 
         # Entrada na abertura do próximo candle cheio, para dar tempo de o membro abrir a corretora.
         entry_time = signal.candle_time + 2 * self.period
         if time.time() > entry_time - 10:
             LOGGER.warning("Sinal descartado: chegou tarde demais para a entrada das %s.", brt(entry_time))
-            return
+            return None
+        return signal, entry_time
 
+    def can_send(self) -> bool:
+        """Limite global: entradas abertas ao mesmo tempo e intervalo mínimo entre sinais."""
+        if len(self.store.pending) >= self.max_open_entries:
+            return False
+        last_sent = self.store.state.get("last_signal_at") or 0
+        return time.time() - last_sent >= self.cooldown_seconds
+
+    async def maybe_signal(self, closed: list[dict[str, Any]], key: str, asset: str | None = None) -> None:
+        candidate = self.evaluate(closed, asset or self.assets[0])
+        if candidate and self.can_send():
+            await self.send_signal(*candidate, key)
+
+    async def send_signal(self, signal: Signal, entry_time: int, key: str) -> None:
         await self.telegram.text(
             format_signal(signal, entry_time, self.title, self.broker_link, self.tutorial_link)
         )
@@ -607,6 +657,7 @@ class RadarBot:
         }
         self.store.append(record)
         self.store.pending.append({k: record[k] for k in ("id", "session", "asset", "direction", "entry_time", "expiry_minutes")})
+        self.store.state["last_signal_at"] = time.time()
         self.store.save()
         LOGGER.info("Sinal enviado: %s %s entrada %s", signal.asset, signal.direction, brt(entry_time))
 
@@ -642,6 +693,10 @@ class RadarBot:
             (c for c in stored.values() if int(c["time"]) + self.period <= now_ts),
             key=lambda c: int(c["time"]),
         )
+        try:
+            self.store.record_candles(asset, closed)
+        except OSError:
+            LOGGER.exception("Falha ao gravar candles de %s.", asset)
         return bool(candles), closed
 
     async def tick(self, client: Quotex) -> None:
@@ -690,11 +745,19 @@ class RadarBot:
             processed = self.store.state.get("last_processed")
             if not isinstance(processed, dict):
                 processed = self.store.state["last_processed"] = {}
+            candidates: list[tuple[Signal, int]] = []
             for asset, closed in closed_by_asset.items():
                 last_closed = int(closed[-1]["time"])
                 if processed.get(asset) != last_closed:
-                    await self.maybe_signal(closed, key, asset)
+                    candidate = self.evaluate(closed, asset)
+                    if candidate:
+                        candidates.append(candidate)
                     processed[asset] = last_closed
+            # Vários pares sinalizando juntos: manda só o de mais confirmações (empate: ordem de ASSETS).
+            if candidates and self.can_send():
+                order = {a: i for i, a in enumerate(self.assets)}
+                best = max(candidates, key=lambda c: (c[0].confidence, -order.get(c[0].asset, 0)))
+                await self.send_signal(*best, key)
             self.store.save()
 
     async def connect(self) -> Quotex:

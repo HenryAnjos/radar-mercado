@@ -13,6 +13,8 @@ class Signal:
     expiry_minutes: int
     confidence: int
     reasons: tuple[str, ...]
+    trend_ok: bool = True
+    volatility: float | None = None
 
 
 def _closes(candles: list[dict[str, Any]]) -> list[float]:
@@ -63,6 +65,18 @@ def rsi(values: list[float], period: int = 14) -> float | None:
     return 100 - (100 / (1 + relative_strength))
 
 
+def volatility_ratio(candles: list[dict[str, Any]], recent: int = 14, base: int = 100) -> float | None:
+    """Tamanho médio dos últimos candles dividido pela mediana do período: abaixo de 1 = mercado mais parado."""
+    ranges = [float(c["high"]) - float(c["low"]) for c in candles]
+    if len(ranges) < recent + 10:
+        return None
+    reference = sorted(ranges[-base:])
+    median = reference[len(reference) // 2]
+    if median <= 0:
+        return None
+    return (sum(ranges[-recent:]) / recent) / median
+
+
 def analyze_closed_candles(
     candles: list[dict[str, Any]],
     *,
@@ -70,6 +84,8 @@ def analyze_closed_candles(
     period_seconds: int,
     expiry_minutes: int,
     min_confidence: int = 3,
+    trend_filter: bool = False,
+    min_volatility: float = 0.0,
 ) -> Signal | None:
     """Regra demonstrativa de confluência para o MVP.
 
@@ -134,6 +150,19 @@ def analyze_closed_candles(
     if confidence < min_confidence:
         return None
 
+    # Filtro de tendência maior: compra só com EMA 21 acima da EMA 50 (venda, abaixo).
+    trend = ema(closes, 50)
+    trend_ok = bool(trend) and (
+        (direction == "CALL" and slow_now > trend[-1]) or (direction == "PUT" and slow_now < trend[-1])
+    )
+    if trend_filter and not trend_ok:
+        return None
+
+    # Filtro de mercado parado: candles muito menores que o normal deixam o resultado quase aleatório.
+    volatility = volatility_ratio(candles)
+    if min_volatility and (volatility is None or volatility < min_volatility):
+        return None
+
     return Signal(
         asset=asset,
         direction=direction,
@@ -142,4 +171,6 @@ def analyze_closed_candles(
         expiry_minutes=expiry_minutes,
         confidence=confidence,
         reasons=tuple(reasons),
+        trend_ok=trend_ok,
+        volatility=volatility,
     )

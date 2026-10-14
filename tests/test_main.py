@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from datetime import datetime, time as clock_time
 from unittest.mock import AsyncMock
 
@@ -465,22 +466,22 @@ def test_tick_multi_asset(bot, monkeypatch):
     client.api.candle_v2_data = {}
     client.get_candles.side_effect = get_candles
     bot.resolve_pending = AsyncMock()
-    bot.maybe_signal = AsyncMock()
+    evaluated = []
+    bot.evaluate = lambda closed, asset: evaluated.append(asset)
     monkeypatch.setattr(main, "current_window", lambda now, windows: windows[0])
 
     asyncio.run(bot.tick(client))
 
     resolved = [call.args[1] for call in bot.resolve_pending.await_args_list]
-    signaled = [call.args[2] for call in bot.maybe_signal.await_args_list]
-    assert resolved == signaled == ["EURUSD_otc", "GBPUSD_otc"]
+    assert resolved == evaluated == ["EURUSD_otc", "GBPUSD_otc"]
     assert bot.store.state["last_processed"] == {
         "EURUSD_otc": current - PERIOD,
         "GBPUSD_otc": current - PERIOD,
     }
     # Mesmo candle de novo: não reavalia.
-    bot.maybe_signal.reset_mock()
+    evaluated.clear()
     asyncio.run(bot.tick(client))
-    bot.maybe_signal.assert_not_awaited()
+    assert evaluated == []
 
 
 def test_one_open_entry_per_asset(bot):
@@ -496,3 +497,97 @@ def test_resolve_pending_only_matching_asset(bot):
     assert len(bot.store.pending) == 1
     asyncio.run(bot.resolve_pending(candles(1.1, 1.2), "EURUSD_otc"))
     assert bot.store.pending == []
+
+
+def _signal(asset, confidence, entry):
+    from src.strategy import Signal
+
+    return Signal(asset=asset, direction="CALL", candle_time=entry - 2 * PERIOD, period_seconds=PERIOD,
+                  expiry_minutes=2, confidence=confidence, reasons=("teste",)), entry
+
+
+def signal_texts(bot):
+    return [c.args[0] for c in bot.telegram.text.await_args_list if "SINAL" in c.args[0]]
+
+
+def sent_signals(bot):
+    return len(signal_texts(bot))
+
+
+def test_tick_sends_only_best_signal_and_respects_limits(bot, monkeypatch):
+    import time
+
+    import src.main as main
+
+    current = int(time.time()) // PERIOD * PERIOD
+    rows = [
+        {"time": current - i * PERIOD, "open": 1.1, "close": 1.1, "high": 1.2, "low": 1.0}
+        for i in range(40, 0, -1)
+    ]
+    bot.assets = ["EURUSD_otc", "GBPUSD_otc", "USDJPY_otc"]
+    client = AsyncMock()
+    client.api.candle_v2_data = {}
+    client.get_candles.return_value = rows
+    bot.resolve_pending = AsyncMock()
+    monkeypatch.setattr(main, "current_window", lambda now, windows: windows[0])
+    entry = current + PERIOD
+    confidence = {"EURUSD_otc": 3, "GBPUSD_otc": 4, "USDJPY_otc": 3}
+    bot.evaluate = lambda closed, asset: _signal(asset, confidence[asset], entry)
+
+    asyncio.run(bot.tick(client))
+    assert sent_signals(bot) == 1  # só um sinal, mesmo com 3 pares sinalizando
+    assert "GBP/USD (OTC)" in signal_texts(bot)[-1]  # o de mais confirmações
+    assert [p["asset"] for p in bot.store.pending] == ["GBPUSD_otc"]
+
+    # Com entrada aberta (MAX_OPEN_ENTRIES=1), novo candle não gera sinal.
+    bot.store.state["last_processed"] = {}
+    asyncio.run(bot.tick(client))
+    assert sent_signals(bot) == 1
+
+    # Sem entrada aberta, mas dentro do intervalo mínimo: também não.
+    bot.store.pending.clear()
+    bot.cooldown_seconds = 300
+    bot.store.state["last_processed"] = {}
+    asyncio.run(bot.tick(client))
+    assert sent_signals(bot) == 1
+
+    # Passou o intervalo: volta a sinalizar.
+    bot.store.state["last_signal_at"] = time.time() - 301
+    bot.store.state["last_processed"] = {}
+    asyncio.run(bot.tick(client))
+    assert sent_signals(bot) == 2
+
+
+def test_record_candles_appends_only_new(bot):
+    rows = candles(1.1, 1.2, count=5)
+    bot.store.record_candles("EURUSD_otc", rows[:3])
+    bot.store.record_candles("EURUSD_otc", rows)  # 3 repetidos + 2 novos
+    path = bot.store.candles_dir / "EURUSD_otc.jsonl"
+    times = [json.loads(line)["time"] for line in path.read_text().splitlines()]
+    assert times == [c["time"] for c in rows]
+
+    # Reinício: lê o último gravado do arquivo e não duplica.
+    from src.main import Store
+
+    store = Store(bot.store.state_path.parent)
+    store.record_candles("EURUSD_otc", rows)
+    assert len(path.read_text().splitlines()) == 5
+
+
+def test_backtest_outcome_and_one_entry_per_asset():
+    from src.backtest import outcome, simulate
+
+    by_time = {c["time"]: c for c in candles(1.1, 1.2, count=5)}
+    assert outcome(by_time, "CALL", ENTRY, 5, PERIOD) == "WIN"
+    assert outcome(by_time, "PUT", ENTRY, 5, PERIOD) == "LOSS"
+    assert outcome(by_time, "CALL", ENTRY, 10, PERIOD) is None
+
+    def row(t, asset="EURUSD_otc"):
+        return {"asset": asset, "time": t, "direction": "CALL", "confidence": 3, "trend_ok": True,
+                "volatility": 1.0, "outcomes": {1: "WIN", 2: "LOSS", 3: "WIN", 5: "WIN"}}
+
+    rows = [row(0), row(60), row(120), row(180), row(60, "GBPUSD_otc")]
+    rows.sort(key=lambda r: r["time"])
+    # Expiração 2 min: entrada em 120, resultado no candle 180 -> par livre de novo em 180.
+    taken = simulate(rows, 3, 2, False, 0.0, PERIOD)
+    assert [(t, a) for t, a, _ in taken] == [(0, "EURUSD_otc"), (60, "GBPUSD_otc"), (180, "EURUSD_otc")]
