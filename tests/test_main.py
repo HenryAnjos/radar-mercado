@@ -341,3 +341,47 @@ def test_merge_history_uses_raw_candles():
     assert [c["time"] for c in merged] == [60, 120, 180, 240]
     assert merged[2] == {"time": 180, "open": 1.2, "close": 1.3, "high": 1.4, "low": 1.1}
     assert merge_history(ticks, None)[0]["open"] == 9.0
+
+
+def test_fresh_session_changes_only_session_id():
+    from src.main import fresh_session
+
+    url = "http://user:pass_country-br_session-rK1OnSkE_lifetime-24h@geo.iproyal.com:12321"
+    new = fresh_session(url)
+    assert new != url
+    assert new.startswith("http://user:pass_country-br_session-")
+    assert new.endswith("_lifetime-24h@geo.iproyal.com:12321")
+    assert fresh_session("http://u:p@1.2.3.4:80") == "http://u:p@1.2.3.4:80"
+
+
+def test_sticky_proxy_retries_quickly_with_new_ip(bot, monkeypatch):
+    import os
+    import src.main as main
+
+    for name in ("HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy", "NO_PROXY", "no_proxy"):
+        monkeypatch.setenv(name, "")
+    bot.proxies = ["http://u:p_country-br_session-abc_lifetime-24h@geo.iproyal.com:12321"]
+    used = []
+
+    class FakeQuotex:
+        def __init__(self, **kwargs):
+            pass
+
+        async def connect(self):
+            used.append(os.environ["HTTPS_PROXY"])
+            return len(used) == 6, "HTTP 403"
+
+        async def close(self):
+            return True
+
+    sleeps = []
+
+    async def fake_sleep(seconds):
+        sleeps.append(seconds)
+
+    monkeypatch.setattr(main, "Quotex", FakeQuotex)
+    monkeypatch.setattr(main.asyncio, "sleep", fake_sleep)
+
+    asyncio.run(bot.connect())
+    assert len(set(used)) == 6  # cada tentativa com sessão (IP) nova
+    assert sleeps == [15, 15, 15, 15, 60]

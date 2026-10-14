@@ -5,6 +5,9 @@ import html
 import json
 import logging
 import os
+import random
+import re
+import string
 import time
 from datetime import datetime, timedelta, time as clock_time
 from pathlib import Path
@@ -84,6 +87,13 @@ def parse_proxies(raw: str) -> list[str]:
 def proxy_label(proxy: str) -> str:
     """Só host:porta, para o log nunca mostrar usuário e senha."""
     return proxy.rsplit("@", 1)[-1].split("://", 1)[-1]
+
+
+def fresh_session(proxy: str) -> str:
+    """Proxies residenciais sticky (ex.: IPRoyal `_session-XXXX`) prendem um IP por sessão.
+    Um id novo a cada tentativa troca o IP, para um IP marcado pela Cloudflare não travar o bot."""
+    session_id = "".join(random.choices(string.ascii_letters + string.digits, k=8))
+    return re.sub(r"([_-]session-)[A-Za-z0-9]+", rf"\g<1>{session_id}", proxy, count=1)
 
 
 def use_proxy(proxy: str) -> None:
@@ -608,9 +618,9 @@ class RadarBot:
         while True:
             via = ""
             if self.proxies:
-                proxy = self.proxies[attempt % len(self.proxies)]
+                proxy = fresh_session(self.proxies[attempt % len(self.proxies)])
                 use_proxy(proxy)
-                via = f" via proxy {proxy_label(proxy)} ({attempt % len(self.proxies) + 1}/{len(self.proxies)})"
+                via = f" via proxy {proxy_label(proxy)} (tentativa {attempt + 1})"
             attempt += 1
             client = Quotex(
                 email=self.email,
@@ -635,7 +645,11 @@ class RadarBot:
                 pass
 
             # Com lista de proxies, testa o próximo logo; só espera mais depois de uma volta completa.
-            if self.proxies and attempt % len(self.proxies):
+            # Proxy com sessão sticky ganha IP novo a cada tentativa: vale tentar algumas vezes logo.
+            cycle = len(self.proxies)
+            if any(re.search(r"[_-]session-", p) for p in self.proxies):
+                cycle = max(cycle, 5)
+            if self.proxies and attempt % cycle:
                 LOGGER.error("Não foi possível conectar na Quotex: %s. Testando o próximo proxy.", message)
                 await asyncio.sleep(15)
                 continue
