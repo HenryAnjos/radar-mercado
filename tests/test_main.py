@@ -229,3 +229,46 @@ def test_tick_ignores_open_candle(bot):
     closed = bot.resolve_pending.await_args.args[0]
     assert closed[-1]["time"] == current - PERIOD
     assert [c["time"] for c in closed] == sorted(c["time"] for c in closed)
+
+
+def test_curl_response_has_reason_phrase():
+    from curl_cffi.requests import Response
+
+    response = Response()
+    response.status_code = 403
+    response.reason = "Forbidden"
+    assert response.reason_phrase == "HTTP 403 Forbidden"
+
+
+def test_connect_retries_with_growing_delay(bot, monkeypatch):
+    import src.main as main
+
+    attempts = []
+
+    class FakeQuotex:
+        def __init__(self, **kwargs):
+            pass
+
+        async def connect(self):
+            attempts.append(1)
+            if len(attempts) == 1:
+                raise RuntimeError("HTTP 403: blocked by Cloudflare challenge")
+            if len(attempts) == 2:
+                return False, "Login failed."
+            return True, "Login successful."
+
+        async def close(self):
+            return True
+
+    sleeps = []
+
+    async def fake_sleep(seconds):
+        sleeps.append(seconds)
+
+    monkeypatch.setattr(main, "Quotex", FakeQuotex)
+    monkeypatch.setattr(main.asyncio, "sleep", fake_sleep)
+
+    client = asyncio.run(bot.connect())
+    assert isinstance(client, FakeQuotex)
+    assert len(attempts) == 3
+    assert sleeps == [60, 120]

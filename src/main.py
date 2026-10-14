@@ -12,8 +12,17 @@ from typing import Any
 from zoneinfo import ZoneInfo
 
 import httpx
+from curl_cffi.requests import Response as CurlResponse
 from dotenv import load_dotenv
 from pyquotex.stable_api import Quotex
+
+# A pyquotex migrou de httpx para curl_cffi mas ainda lê `reason_phrase` (só existe no httpx)
+# quando a página de login falha. Sem isto o erro real (ex.: bloqueio da Cloudflare) some
+# atrás de um AttributeError.
+if not hasattr(CurlResponse, "reason_phrase"):
+    CurlResponse.reason_phrase = property(
+        lambda self: f"HTTP {self.status_code} {getattr(self, 'reason', '') or ''}".strip()
+    )
 
 from .strategy import Signal, analyze_closed_candles
 
@@ -508,18 +517,34 @@ class RadarBot:
             self.store.state["last_processed"] = last_closed
             self.store.save()
 
-    async def run(self) -> None:
-        client = Quotex(
-            email=self.email,
-            password=self.password,
-            lang="pt",
-            host=self.host,
-            on_otp_callback=otp_unavailable,
-        )
-        connected, message = await client.connect()
-        if not connected:
-            raise RuntimeError(f"Não foi possível conectar na Quotex: {message}")
+    async def connect(self) -> Quotex:
+        """Tenta logar com espera crescente, para não martelar a Quotex (e piorar um bloqueio) em loop."""
+        delay = 60
+        while True:
+            client = Quotex(
+                email=self.email,
+                password=self.password,
+                lang="pt",
+                host=self.host,
+                on_otp_callback=otp_unavailable,
+            )
+            try:
+                connected, message = await client.connect()
+            except Exception as exc:
+                connected, message = False, f"{type(exc).__name__}: {exc}"
+            if connected:
+                return client
 
+            LOGGER.error("Não foi possível conectar na Quotex: %s. Nova tentativa em %s min.", message, delay // 60)
+            try:
+                await client.close()
+            except Exception:
+                pass
+            await asyncio.sleep(delay)
+            delay = min(delay * 2, 30 * 60)
+
+    async def run(self) -> None:
+        client = await self.connect()
         LOGGER.info("Conectado. Lendo somente candles de %s em %ss.", self.asset, self.period)
         try:
             while True:
