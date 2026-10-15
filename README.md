@@ -56,6 +56,15 @@ python -m pytest -q
 4. Mantenha **1 réplica**. Duas instâncias mandariam sinais duplicados.
 5. Acompanhe a aba **Logs**: deve aparecer "Conectado. Lendo somente candles…".
 
+## Placar e dados gravados
+
+```
+python -m src.stats
+```
+
+Mostra o placar real (total, por nível de gale, por entrada sem gale, por estratégia, par e sessão) e quantos
+candles cada par já tem gravados, com os buracos de quando o bot ficou desconectado.
+
 ## Backtest
 
 O bot grava os candles de todos os pares em `DATA_DIR/candles/`. Depois de um ou dois dias rodando:
