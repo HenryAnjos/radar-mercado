@@ -446,16 +446,25 @@ def test_format_result_random_phrase():
 
 
 def test_format_session_start_lists_pairs():
-    from src.main import format_session_start
+    from src.main import DEFAULT_ASSETS, format_session_start
 
     text = format_session_start("2026-10-14 09:00-11:00", ["EURUSD_otc", "USDJPY_otc"])
-    assert "Sessão 09:00–11:00" in text
-    assert "Pares OTC: EUR/USD, USD/JPY" in text
+    assert "Monitoramento ativo:</b> 09:00 às 11:00" in text
+    assert "2 pares OTC monitorados" in text
+    assert "💱 EUR/USD · USD/JPY\n" in text
+    assert "até 2% da banca por entrada." in text
 
-    from src.main import DEFAULT_ASSETS
-    many = format_session_start("2026-10-14 09:00-11:00", DEFAULT_ASSETS.split(","))
-    assert "24 pares OTC: EUR/USD, GBP/USD, USD/JPY, AUD/CAD, EUR/JPY, AUD/USD e mais 18" in many
-
+    many = format_session_start("2026-10-14 00:00-23:59", DEFAULT_ASSETS.split(","), max_gale=2)
+    assert many == (
+        "<b>📈 RADAR LIGADO · OPERAÇÕES INICIADAS</b>\n\n"
+        "🕐 <b>Monitoramento ativo:</b> 00:00 às 23:59\n"
+        "📡 <b>24 pares OTC monitorados</b>\n"
+        "💱 EUR/USD · GBP/USD · USD/JPY · AUD/CAD · EUR/JPY · AUD/USD + 18 pares\n\n"
+        "🎯 Fique atento aos sinais e acompanhe as oportunidades identificadas pelo radar.\n\n"
+        "🛡️ <b>Gestão de risco:</b> exposição sugerida de até 2% da banca por ciclo, "
+        "considerando a entrada inicial e até 2 gales.\n\n"
+        "<b>O radar está ligado. Acompanhe os sinais e mantenha a disciplina.</b>"
+    )
 
 def test_tick_multi_asset(bot, monkeypatch):
     import time

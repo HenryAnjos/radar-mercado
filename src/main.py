@@ -354,25 +354,35 @@ def format_result(result: dict[str, Any], session_results: list[dict[str, Any]])
     )
 
 
-def pairs_line(assets: list[str]) -> str:
-    labels = [asset_label(a).replace(" (OTC)", "") for a in assets]
-    otc = " OTC" if all(a.lower().endswith("_otc") for a in assets) else ""
-    if len(labels) <= 8:
-        return f"Pares{otc}: {', '.join(labels)}"
-    return f"{len(labels)} pares{otc}: {', '.join(labels[:6])} e mais {len(labels) - 6}"
-
-
 def format_session_start(key: str, assets: list[str] | str, max_gale: int = 0) -> str:
-    window = key.split(" ", 1)[1].replace("-", "–")
+    start, end = key.split(" ", 1)[1].split("-")
     if isinstance(assets, str):
         assets = [assets]
-    return (
-        "📡 <b>Radar ligado · Operações iniciando</b>\n\n"
-        f"Sessão {window}\n"
-        f"{pairs_line(assets)}\n"
-        "Fique atento aos sinais. Risco sugerido: até 2% da banca "
-        + (f"por ciclo (entrada + até {max_gale} gale{'s' if max_gale > 1 else ''})." if max_gale else "por entrada.")
-    )
+    labels = [asset_label(a).replace(" (OTC)", "") for a in assets]
+    otc = " OTC" if all(a.lower().endswith("_otc") for a in assets) else ""
+    plural = "par" if len(labels) == 1 else "pares"
+    shown = " · ".join(labels[:6])
+    if len(labels) > 6:
+        rest = len(labels) - 6
+        shown += f" + {rest} {'par' if rest == 1 else 'pares'}"
+    if max_gale:
+        coverage = f"a entrada inicial e até {max_gale} gale{'s' if max_gale > 1 else ''}"
+        exposure = f"até 2% da banca por ciclo, considerando {coverage}"
+    else:
+        exposure = "até 2% da banca por entrada"
+    return "\n".join([
+        "<b>📈 RADAR LIGADO · OPERAÇÕES INICIADAS</b>",
+        "",
+        f"🕐 <b>Monitoramento ativo:</b> {start} às {end}",
+        f"📡 <b>{len(labels)} {plural}{otc} monitorados</b>",
+        f"💱 {shown}",
+        "",
+        "🎯 Fique atento aos sinais e acompanhe as oportunidades identificadas pelo radar.",
+        "",
+        f"🛡️ <b>Gestão de risco:</b> exposição sugerida de {exposure}.",
+        "",
+        "<b>O radar está ligado. Acompanhe os sinais e mantenha a disciplina.</b>",
+    ])
 
 
 def format_report(
