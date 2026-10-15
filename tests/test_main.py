@@ -518,7 +518,7 @@ def _signal(asset, confidence, entry):
 
 
 def signal_texts(bot):
-    return [c.args[0] for c in bot.telegram.text.await_args_list if "SINAL" in c.args[0]]
+    return [c.args[0] for c in bot.telegram.text.await_args_list if "Expiração" in c.args[0]]
 
 
 def sent_signals(bot):
