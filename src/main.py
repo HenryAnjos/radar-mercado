@@ -291,23 +291,13 @@ def format_signal(signal: Signal, entry_time: int, title: str, broker_link: str,
         f"📊 <b>{asset_label(signal.asset)} · {brt(entry_time):%H:%M} · {DIRECTION_LABEL[signal.direction]}</b>",
     ]
     if max_gale:
-        gale_times = " · ".join(
-            f"G{n} {brt(entry_time + n * signal.expiry_minutes * 60):%H:%M}" for n in range(1, max_gale + 1)
-        )
-        lines += [
-            f"🔁 Se não bater, faça até {max_gale} re-entrada{'s' if max_gale > 1 else ''} (gale): {gale_times}",
-            # Com gale o risco é do ciclo inteiro: entrada + gales somados podem chegar a 2^(n+1)-1 entradas.
-            f"💼 Risco: o ciclo completo (entrada + gales = {2 ** (max_gale + 1) - 1}x a entrada) até 2% da banca",
-        ]
-    else:
-        lines.append("💼 Risco: até 2% da banca · sem gale")
+        lines.append(f"🔁 faça até {max_gale} re-entrada{'s' if max_gale > 1 else ''} (gale)")
     if broker_link or tutorial_link:
         lines.append("")
     if broker_link:
         lines.append(f'➡️ <a href="{html.escape(broker_link, quote=True)}">Clique aqui</a> e abra a corretora')
     if tutorial_link:
         lines.append(f'➡️ Não sabe operar? <a href="{html.escape(tutorial_link, quote=True)}">Clique aqui</a>')
-    lines += ["", "<i>⚠️ Alto risco." + (" Link de afiliado." if broker_link else "") + "</i>"]
     return "\n".join(lines)
 
 

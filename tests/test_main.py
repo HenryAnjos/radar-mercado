@@ -804,10 +804,17 @@ def test_signal_and_report_show_gale():
     from src.strategy import Signal
 
     signal = Signal("EURUSD_otc", "CALL", ENTRY - 2 * PERIOD, PERIOD, 2, 3, ("x",))
-    text = format_signal(signal, ENTRY, "SINAL GRÁTIS", "", "", max_gale=2)
-    assert "faça até 2 re-entradas (gale): G1 09:02 · G2 09:04" in text
-    assert "7x a entrada" in text and "sem gale" not in text
-    assert "sem gale" in format_signal(signal, ENTRY, "SINAL GRÁTIS", "", "", max_gale=0)
+    text = format_signal(signal, ENTRY, "PADRÃO IDENTIFICADO!", "https://corretora", "https://tutorial", max_gale=2)
+    assert text == (
+        "📡 <b><i>PADRÃO IDENTIFICADO!</i></b>\n\n"
+        "🕐 Horário de Brasília (UTC-3)\n"
+        "⏱ Expiração: <b>2 min</b>\n"
+        "📊 <b>EUR/USD (OTC) · 09:00 · 🟢 COMPRA</b>\n"
+        "🔁 faça até 2 re-entradas (gale)\n\n"
+        '➡️ <a href="https://corretora">Clique aqui</a> e abra a corretora\n'
+        '➡️ Não sabe operar? <a href="https://tutorial">Clique aqui</a>'
+    )
+    assert "re-entrada" not in format_signal(signal, ENTRY, "SINAL GRÁTIS", "", "", max_gale=0)
 
     signals = [{"id": i, "asset": "EURUSD_otc", "direction": "CALL", "entry_time": ENTRY + n * 600}
                for n, i in enumerate("abcd")]
