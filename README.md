@@ -77,6 +77,15 @@ No Railway, rode na aba **Console** do serviço. A ferramenta compara variaçõe
 filtro de tendência, filtro de mercado parado) e mostra a taxa de acerto nos primeiros 70% e nos últimos 30%
 dos dados. Só vale trocar a configuração se a variação for melhor nas duas partes.
 
+## Pesquisa de padrões
+
+```
+python -m src.research
+```
+
+Testa ~35 ideias (sequências de cor, MHI, RSI, Bollinger, candle grande, pavio, cruzamentos) em 4 expirações,
+com a mesma regra de entrada do bot (3 min de antecedência), e marca com ◀ o que passa de 55% nas duas metades.
+
 ## Arquivos de auditoria (`data/`)
 
 - `state.json`: sessão aberta, entradas aguardando resultado e último candle lido. Permite reiniciar sem perder nada.
