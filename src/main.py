@@ -226,6 +226,17 @@ def current_window(now: datetime, windows: list[Window]) -> Window | None:
     return None
 
 
+def next_window_start(now: datetime, windows: list[Window]) -> datetime:
+    """Próximo horário de início de janela depois de `now` (hoje ou amanhã)."""
+    candidates = []
+    for start, _ in windows:
+        moment = now.replace(hour=start.hour, minute=start.minute, second=0, microsecond=0)
+        if moment <= now:
+            moment += timedelta(days=1)
+        candidates.append(moment)
+    return min(candidates)
+
+
 def session_key(now: datetime, window: Window) -> str:
     """Identifica a sessão pela data de início + janela, ex.: 2026-10-14 09:00-11:00."""
     start, end = window
@@ -598,6 +609,9 @@ class RadarBot:
         self.min_volatility = float(os.getenv("MIN_VOLATILITY", "0"))
         self.cooldown_seconds = max(0, int(os.getenv("SIGNAL_COOLDOWN_MINUTES", "0"))) * 60
         self.windows = parse_windows(os.getenv("ALLOWED_WINDOWS", "09:00-11:00"))
+        # Fora das janelas, desconecta da Quotex (economiza proxy) e volta alguns minutos antes da próxima.
+        self.idle_disconnect = os.getenv("IDLE_DISCONNECT", "true").lower() in ("1", "true", "sim", "yes")
+        self.prewarm_minutes = max(1, int(os.getenv("PREWARM_MINUTES", "5")))
 
         self.title = os.getenv("SIGNAL_TITLE", "PADRÃO IDENTIFICADO!")
         self.broker_link = os.getenv("BROKER_LINK", "").strip()
@@ -804,10 +818,17 @@ class RadarBot:
 
     async def fetch_closed(self, client: Quotex, asset: str, now_ts: float) -> tuple[bool, list[dict[str, Any]]]:
         """Busca candles de um par e devolve (recebeu algo agora?, candles fechados acumulados)."""
+        stored = self._candles.setdefault(asset, {})
+        last_closed_start = int(now_ts) // self.period * self.period - self.period
+        if last_closed_start in stored:
+            # Já tem o último candle fechado: nada novo até o próximo minuto, não gasta proxy.
+            return True, self._closed(stored, now_ts)
+        # Histórico completo só quando o cache está curto; no resto, os últimos minutos bastam.
+        full = len(stored) < self.offset // self.period - 10
         candles = await client.get_candles(
             asset=asset,
             end_from_time=time.time(),
-            offset=self.offset,
+            offset=self.offset if full else 10 * self.period,
             period=self.period,
             timeout=15,
         )
@@ -820,23 +841,25 @@ class RadarBot:
         candles = merge_history(candles or [], raw)
 
         # Guarda os candles entre ciclos: uma resposta vazia ou parcial da Quotex não apaga o histórico.
-        stored = self._candles.setdefault(asset, {})
         for candle in candles:
             stored[candle["time"]] = candle
         oldest = now_ts - self.offset - 10 * self.period
         self._candles[asset] = stored = {t: c for t, c in stored.items() if t >= oldest}
 
-        # A pyquotex às vezes já descarta o candle em formação, às vezes não; por isso o filtro é
-        # pelo horário: só entra candle cujo período já terminou. Nunca use candle aberto.
-        closed = sorted(
-            (c for c in stored.values() if int(c["time"]) + self.period <= now_ts),
-            key=lambda c: int(c["time"]),
-        )
+        closed = self._closed(stored, now_ts)
         try:
             self.store.record_candles(asset, closed)
         except OSError:
             LOGGER.exception("Falha ao gravar candles de %s.", asset)
         return bool(candles), closed
+
+    def _closed(self, stored: dict[int, dict[str, Any]], now_ts: float) -> list[dict[str, Any]]:
+        # A pyquotex às vezes já descarta o candle em formação, às vezes não; por isso o filtro é
+        # pelo horário: só entra candle cujo período já terminou. Nunca use candle aberto.
+        return sorted(
+            (c for c in stored.values() if int(c["time"]) + self.period <= now_ts),
+            key=lambda c: int(c["time"]),
+        )
 
     async def tick(self, client: Quotex) -> None:
         now_ts = time.time()
@@ -1000,11 +1023,36 @@ class RadarBot:
             await asyncio.sleep(delay)
             delay = min(delay * 2, 30 * 60)
 
+    def sleep_until(self, now: datetime) -> datetime | None:
+        """Fora das janelas, sem sessão aberta nem entrada pendente: até quando dá para desconectar."""
+        if not self.idle_disconnect or self.store.pending or self.store.state["session"]:
+            return None
+        if current_window(now, self.windows):
+            return None
+        wake = next_window_start(now, self.windows) - timedelta(minutes=self.prewarm_minutes)
+        return wake if wake - now > timedelta(minutes=2) else None
+
     async def run(self) -> None:
-        client = await self.connect()
-        LOGGER.info("Conectado. Lendo somente candles de %s em %ss.", ", ".join(self.assets), self.period)
+        client: Quotex | None = None
         try:
             while True:
+                wake = self.sleep_until(datetime.now(BRT))
+                if wake:
+                    if client is not None:
+                        try:
+                            await client.close()
+                        except Exception:
+                            pass
+                        client = None
+                    LOGGER.info("Fora das janelas: desconectado da Quotex até %s para não gastar proxy.",
+                                wake.strftime("%d/%m %H:%M"))
+                    # Dorme em blocos curtos para acordar na hora mesmo se o relógio do servidor ajustar.
+                    while (remaining := (wake - datetime.now(BRT)).total_seconds()) > 0:
+                        await asyncio.sleep(min(remaining, 300))
+                    continue
+                if client is None:
+                    client = await self.connect()
+                    LOGGER.info("Conectado. Lendo somente candles de %s em %ss.", ", ".join(self.assets), self.period)
                 try:
                     await self.tick(client)
                 except ReconnectNeeded as exc:
@@ -1020,7 +1068,8 @@ class RadarBot:
                     LOGGER.exception("Falha no ciclo; tentando novamente.")
                 await asyncio.sleep(self.poll_seconds)
         finally:
-            await client.close()
+            if client is not None:
+                await client.close()
 
 
 if __name__ == "__main__":

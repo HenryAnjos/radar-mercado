@@ -411,7 +411,7 @@ def test_tick_keeps_history_on_empty_response_and_reconnects(bot):
     current = int(time.time()) // PERIOD * PERIOD
     rows = [
         {"time": current - i * PERIOD, "open": 1.1, "close": 1.1, "high": 1.2, "low": 1.0}
-        for i in range(40, 0, -1)
+        for i in range(41, 1, -1)  # sem o último candle fechado: o bot continua tentando buscar
     ]
     client = AsyncMock()
     client.api.candle_v2_data = {}
@@ -738,7 +738,7 @@ def test_unresponsive_asset_is_paused(bot):
     for _ in range(5):
         asyncio.run(bot.tick(client))
     assert calls.count("XXXYYY_otc") == 3  # depois de 3 falhas seguidas fica pausado
-    assert calls.count("EURUSD_otc") == 5
+    assert calls.count("EURUSD_otc") == 1  # já tem o último candle: não baixa de novo no mesmo minuto
 
 
 def add_gale_pending(radar, direction="CALL", max_gale=2, expiry=2):
@@ -855,3 +855,49 @@ def test_images_default_to_assets_folder(monkeypatch, tmp_path):
     assert main.optional_path("IMG_WIN", "win") == tmp_path / "assets" / "win.jpg"
     monkeypatch.setenv("IMG_WIN", "nenhuma")
     assert main.optional_path("IMG_WIN", "win") is None
+
+
+def test_fetch_only_when_new_candle_and_incremental_offset(bot):
+    import time
+
+    current = int(time.time()) // PERIOD * PERIOD
+    full = [{"time": current - i * PERIOD, "open": 1.1, "close": 1.1, "high": 1.2, "low": 1.0}
+            for i in range(130, 1, -1)]  # ainda falta o último candle fechado
+    offsets = []
+
+    async def get_candles(asset, offset, **kwargs):
+        offsets.append(offset)
+        return full if len(offsets) == 1 else full + [
+            {"time": current - PERIOD, "open": 1.1, "close": 1.1, "high": 1.2, "low": 1.0}]
+
+    client = AsyncMock()
+    client.api.candle_v2_data = {}
+    client.get_candles.side_effect = get_candles
+    now = time.time()
+    asyncio.run(bot.fetch_closed(client, "EURUSD_otc", now))  # histórico completo
+    asyncio.run(bot.fetch_closed(client, "EURUSD_otc", now))  # só os últimos minutos
+    asyncio.run(bot.fetch_closed(client, "EURUSD_otc", now))  # já tem o último: não baixa
+    assert offsets == [bot.offset, 10 * PERIOD]
+
+
+def test_next_window_start_and_sleep(bot):
+    from src.main import next_window_start, parse_windows
+
+    windows = parse_windows("09:00-10:00,14:00-15:00,20:00-21:00")
+    assert next_window_start(at(8, 0), windows) == at(9, 0)
+    assert next_window_start(at(10, 30), windows) == at(14, 0)
+    assert next_window_start(at(21, 30), windows) == at(9, 0, day=15)
+
+    bot.windows = windows
+    bot.prewarm_minutes = 5
+    assert bot.sleep_until(at(10, 30)) == at(13, 55)   # fora da janela: dorme até 5 min antes
+    assert bot.sleep_until(at(9, 30)) is None           # dentro da janela
+    assert bot.sleep_until(at(13, 57)) is None          # já no aquecimento
+    bot.store.state["session"] = "2026-10-14 09:00-10:00"
+    assert bot.sleep_until(at(10, 5)) is None           # relatório da sessão ainda não saiu
+    bot.store.state["session"] = None
+    add_pending(bot, "CALL")
+    assert bot.sleep_until(at(10, 5)) is None           # entrada aguardando resultado
+    bot.store.pending.clear()
+    bot.idle_disconnect = False
+    assert bot.sleep_until(at(10, 30)) is None          # IDLE_DISCONNECT=false: fica sempre conectado
