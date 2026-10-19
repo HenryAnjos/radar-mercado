@@ -901,3 +901,42 @@ def test_next_window_start_and_sleep(bot):
     bot.store.pending.clear()
     bot.idle_disconnect = False
     assert bot.sleep_until(at(10, 30)) is None          # IDLE_DISCONNECT=false: fica sempre conectado
+
+
+def test_live_streams_are_cancelled_after_each_read(bot):
+    import time
+
+    current = int(time.time()) // PERIOD * PERIOD
+    rows = [{"time": current - i * PERIOD, "open": 1.1, "close": 1.1, "high": 1.2, "low": 1.0}
+            for i in range(130, 1, -1)]
+    client = AsyncMock()
+    client.api.candle_v2_data = {}
+    client.get_candles.return_value = rows
+    asyncio.run(bot.fetch_closed(client, "EURUSD_otc", time.time()))
+    client.stop_candles_stream.assert_awaited_once_with("EURUSD_otc")
+
+
+def test_traffic_meter_counts_websocket_bytes():
+    from pyquotex.api import QuotexAPI
+
+    import src.main as main
+
+    before = main.TRAFFIC.total
+    api = QuotexAPI.__new__(QuotexAPI)  # sem conectar
+    try:
+        asyncio.run(QuotexAPI._on_message(api, "x" * 1000))
+    except Exception:
+        pass  # o handler original pode falhar sem estado; o importante é contar antes
+    assert main.TRAFFIC.total - before == 1000
+
+
+def test_daily_traffic_limit_disconnects_until_midnight(bot):
+    import src.main as main
+
+    bot.daily_limit_mb = 1
+    bot.windows = main.parse_windows("09:00-10:00")
+    assert bot.sleep_until(at(9, 30)) is None            # dentro da janela, abaixo do limite
+    main.TRAFFIC.add(2_000_000)                          # 2 MB recebidos
+    assert bot.sleep_until(at(9, 30)) == at(0, 0, day=15).replace(second=5)
+    add_pending(bot, "CALL")
+    assert bot.sleep_until(at(9, 30)) is None            # nunca larga entrada aguardando resultado

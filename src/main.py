@@ -19,6 +19,7 @@ from curl_cffi.requests import Response as CurlResponse
 from dotenv import load_dotenv
 import pyquotex.config as qx_config
 import pyquotex.network.navigator as qx_navigator
+from pyquotex.api import QuotexAPI
 from pyquotex.stable_api import Quotex
 
 # A pyquotex migrou de httpx para curl_cffi mas ainda lê `reason_phrase` (só existe no httpx)
@@ -58,6 +59,28 @@ def _impersonating_session(*args: Any, **kwargs: Any) -> Any:
 
 
 qx_navigator.AsyncSession = _impersonating_session
+
+
+class Traffic:
+    """Conta os bytes recebidos da Quotex pelo websocket (é o que consome o proxy)."""
+
+    def __init__(self) -> None:
+        self.total = 0
+
+    def add(self, size: int) -> None:
+        self.total += size
+
+
+TRAFFIC = Traffic()
+_original_on_message = QuotexAPI._on_message
+
+
+async def _counting_on_message(self: Any, msg: bytes | str) -> None:
+    TRAFFIC.add(len(msg))
+    return await _original_on_message(self, msg)
+
+
+QuotexAPI._on_message = _counting_on_message
 # O httpx loga cada URL em INFO, e a URL do Telegram contém o token do bot. Nunca deixe isso ir para o log.
 logging.getLogger("httpx").setLevel(logging.WARNING)
 logging.getLogger("httpcore").setLevel(logging.WARNING)
@@ -612,6 +635,8 @@ class RadarBot:
         # Fora das janelas, desconecta da Quotex (economiza proxy) e volta alguns minutos antes da próxima.
         self.idle_disconnect = os.getenv("IDLE_DISCONNECT", "true").lower() in ("1", "true", "sim", "yes")
         self.prewarm_minutes = max(1, int(os.getenv("PREWARM_MINUTES", "5")))
+        # 0 = sem limite. Ex.: 100 → depois de 100 MB recebidos no dia, desconecta até a meia-noite.
+        self.daily_limit_mb = max(0.0, float(os.getenv("PROXY_DAILY_LIMIT_MB", "0")))
 
         self.title = os.getenv("SIGNAL_TITLE", "PADRÃO IDENTIFICADO!")
         self.broker_link = os.getenv("BROKER_LINK", "").strip()
@@ -628,6 +653,8 @@ class RadarBot:
         self._logged_format: set[str] = set()
         self._short_assets: set[str] = set()
         self._last_status = 0.0
+        self._traffic_seen = TRAFFIC.total
+        self._limit_warned = False
         self._failures: dict[str, int] = {}
         self._paused_until: dict[str, float] = {}
         # IP do proxy que conectou da última vez (sobrevive a reinícios, se ainda for o mesmo proxy configurado).
@@ -832,6 +859,12 @@ class RadarBot:
             period=self.period,
             timeout=15,
         )
+        # A pyquotex assina ticks ao vivo e o livro de ofertas do par a cada leitura e nunca cancela:
+        # com 24 pares isso vira 24 fluxos contínuos consumindo proxy. O bot só precisa do histórico.
+        try:
+            await client.stop_candles_stream(asset)
+        except Exception:
+            LOGGER.debug("Falha ao cancelar o fluxo ao vivo de %s.", asset, exc_info=True)
         raw = (getattr(getattr(client, "api", None), "candle_v2_data", None) or {}).get(asset)
         if asset not in self._logged_format and isinstance(raw, dict):
             sample = (raw.get("candles") or [None])[-1]
@@ -934,6 +967,17 @@ class RadarBot:
                 await self.send_signal(*best, key)
             self.store.save()
 
+    def traffic_today_mb(self) -> float:
+        """Soma o tráfego novo ao total do dia (BRT) guardado no state.json e devolve em MB."""
+        today = datetime.now(BRT).date().isoformat()
+        usage = self.store.state.get("traffic") or {}
+        if usage.get("day") != today:
+            usage = {"day": today, "bytes": 0}
+        usage["bytes"] += TRAFFIC.total - self._traffic_seen
+        self._traffic_seen = TRAFFIC.total
+        self.store.state["traffic"] = usage
+        return usage["bytes"] / 1_000_000
+
     def log_status(self, closed_by_asset: dict[str, list[dict[str, Any]]], key: str | None) -> None:
         """A cada 15 min, um resumo no log: prova que o radar está analisando mesmo sem sinal."""
         now = time.time()
@@ -956,9 +1000,11 @@ class RadarBot:
             1 for s in self.store.events("signal") if s.get("sent_at", "").startswith(datetime.now(BRT).date().isoformat())
         )
         LOGGER.info(
-            "Radar ativo · %s · sessão %s · entradas abertas %s · sinais hoje %s · %s",
-            self.strategy, key or "fora da janela", len(self.store.pending), sent_today, "; ".join(parts),
+            "Radar ativo · %s · sessão %s · entradas abertas %s · sinais hoje %s · dados da Quotex hoje %.1f MB · %s",
+            self.strategy, key or "fora da janela", len(self.store.pending), sent_today, self.traffic_today_mb(),
+            "; ".join(parts),
         )
+        self.store.save()
 
     async def connect(self) -> Quotex:
         """Tenta logar com espera crescente, para não martelar a Quotex (e piorar um bloqueio) em loop."""
@@ -1025,7 +1071,16 @@ class RadarBot:
 
     def sleep_until(self, now: datetime) -> datetime | None:
         """Fora das janelas, sem sessão aberta nem entrada pendente: até quando dá para desconectar."""
-        if not self.idle_disconnect or self.store.pending or self.store.state["session"]:
+        if self.store.pending:
+            return None
+        # Limite diário de dados (protege o saldo do proxy): passou, desconecta até a meia-noite.
+        if self.daily_limit_mb and self.traffic_today_mb() >= self.daily_limit_mb:
+            if not self._limit_warned:
+                LOGGER.warning("Limite diário de %s MB atingido; desconectando até amanhã.", self.daily_limit_mb)
+                self._limit_warned = True
+            return (now + timedelta(days=1)).replace(hour=0, minute=0, second=5, microsecond=0)
+        self._limit_warned = False
+        if not self.idle_disconnect or self.store.state["session"]:
             return None
         if current_window(now, self.windows):
             return None
@@ -1044,8 +1099,9 @@ class RadarBot:
                         except Exception:
                             pass
                         client = None
-                    LOGGER.info("Fora das janelas: desconectado da Quotex até %s para não gastar proxy.",
-                                wake.strftime("%d/%m %H:%M"))
+                    LOGGER.info("Desconectado da Quotex até %s para não gastar proxy (dados hoje: %.1f MB).",
+                                wake.strftime("%d/%m %H:%M"), self.traffic_today_mb())
+                    self.store.save()
                     # Dorme em blocos curtos para acordar na hora mesmo se o relógio do servidor ajustar.
                     while (remaining := (wake - datetime.now(BRT)).total_seconds()) > 0:
                         await asyncio.sleep(min(remaining, 300))
